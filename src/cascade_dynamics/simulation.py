@@ -27,6 +27,23 @@ def initial_vector(config: dict) -> np.ndarray:
     )
 
 
+def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> tuple[np.ndarray, int]:
+    sim_cfg = config["simulation"]
+    startup_cfg = sim_cfg.get("startup_initialization", {})
+    time_s = startup_cfg.get("time_s", sim_cfg["t_start_s"])
+
+    def residual_fn(x: np.ndarray) -> np.ndarray:
+        return model.steady_state_residual(x, time_s)
+
+    return newton_raphson_fd(
+        residual_fn,
+        initial_vector(config),
+        tol=startup_cfg.get("newton_tol", sim_cfg["newton_tol"]),
+        max_iter=startup_cfg.get("newton_max_iter", sim_cfg["newton_max_iter"]),
+        step=startup_cfg.get("fd_step", sim_cfg["fd_step"]),
+    )
+
+
 def run_simulation(config: dict) -> list[dict[str, float]]:
     sim_cfg = config["simulation"]
     control = ControlSystem(config)
@@ -34,13 +51,22 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
 
     dt_s = sim_cfg["dt_s"]
     times = np.arange(sim_cfg["t_start_s"], sim_cfg["t_end_s"] + dt_s, dt_s)
-    unknowns = initial_vector(config)
+    startup_cfg = sim_cfg.get("startup_initialization", {})
+    startup_enabled = startup_cfg.get("enabled", True)
+    startup_iters = 0
+    if startup_enabled:
+        unknowns, startup_iters = solve_startup_initialization(config, model)
+    else:
+        unknowns = initial_vector(config)
     state = unknowns[:2].copy()
     history: list[dict[str, float]] = []
 
     for idx, time_s in enumerate(times):
         if idx == 0:
             step = model.post_process(unknowns, time_s)
+            step.values["startup_initialization_enabled"] = float(startup_enabled)
+            step.values["startup_newton_iterations"] = float(startup_iters)
+            step.values["newton_iterations"] = 0.0
             history.append(step.values)
             continue
 

@@ -201,6 +201,10 @@ class CascadeSystemModel:
         )
         return res
 
+    def steady_state_residual(self, unknowns: np.ndarray, time_s: float) -> np.ndarray:
+        steady_state = unknowns[:2]
+        return self.residual(unknowns, steady_state, time_s, dt_s=1.0)
+
     def post_process(self, unknowns: np.ndarray, time_s: float) -> StepResult:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, m_ref = unknowns
         room_k = room_c + KELVIN_OFFSET

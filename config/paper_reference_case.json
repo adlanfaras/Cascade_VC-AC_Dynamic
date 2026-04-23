@@ -5,7 +5,10 @@
     "dt_s": 0.1,
     "newton_tol": 1e-5,
     "newton_max_iter": 100,
-    "fd_step": 1e-5
+    "fd_step": 1e-5,
+    "startup_initialization": {
+      "enabled": true
+    }
   },
   "fluids": {
     "air": "Air",

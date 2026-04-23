@@ -99,6 +99,18 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case.json
 
 The script prints a short summary and writes plots into `outputs/`.
 
+Before the transient run starts, `simulation.startup_initialization` can run a
+separate steady-state Newton solve. This mode solves the initial temperatures and
+refrigerant mass flow with the sink accumulation term forced to zero, then uses
+that solved vector as the fixed initial condition for the dynamic simulation.
+Disable it with:
+
+```json
+"startup_initialization": {
+  "enabled": false
+}
+```
+
 Temperature inputs and outputs in the JSON config, CSV, plots, and printed
 summary use degrees Celsius. The thermodynamic property calls convert Celsius to
 Kelvin internally only where CoolProp requires absolute temperature.
