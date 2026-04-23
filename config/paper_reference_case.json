@@ -1,0 +1,140 @@
+{
+  "simulation": {
+    "t_start_s": 0.0,
+    "t_end_s": 300.0,
+    "dt_s": 0.1,
+    "newton_tol": 1e-5,
+    "newton_max_iter": 100,
+    "fd_step": 1e-5
+  },
+  "fluids": {
+    "air": "Air",
+    "refrigerant": "Ammonia"
+  },
+  "air_cycle": {
+    "p_low_pa": 101325.0,
+    "pressure_ratio": 1.2623264797,
+    "compressor_eta_is": 0.85,
+    "turbine_eta_is": 0.85,
+    "combined_drive_efficiency": 0.9,
+    "regenerator_ua_w_k": 27467.429052096,
+    "compressor_mass_flow": {
+      "model": "polynomial_volumetric_flow_head",
+      "speed_fraction": 1.0,
+      "head_min_m": 642.22,
+      "head_max_m": 1067.16,
+      "coefficients": [
+        -4.68291944e-13,
+        1.89586409e-9,
+        -3.06313684e-6,
+        0.00246639302,
+        -0.989827168,
+        162.171682
+      ],
+      "q_min_m3_s": 0.0,
+      "q_max_m3_s": 10.0,
+      "m_dot_min_kg_s": 0.5,
+      "m_dot_max_kg_s": 6.0
+    }
+  },
+  "vcc_cycle": {
+    "compressor_pressure_ratio": 4.387,
+    "compressor_eta_is": 0.85,
+    "cascade_ua_w_k": 4216.325690412,
+    "dock_evaporator_ua_w_k": 1200.0,
+    "condenser_ua_w_k": 18000.0,
+    "subcooling_k": 0.0,
+    "expansion_valve": {
+      "opening": 0.5,
+      "flow_coefficient_kg_s_pa": 1.5829e-7
+    }
+  },
+  "thermal_masses": {
+    "room_capacitance_j_k": 850000.0,
+    "dock_capacitance_j_k": 650000.0,
+    "sink_capacitance_j_k": 500000.0
+  },
+  "boundary_conditions": {
+    "dock_initial_c": 5.0,
+    "ambient_c": 30.0,
+    "load_step_time_s": 600.0,
+    "load_before_w": 43844.69420604,
+    "load_after_w": 43844.69420604,
+    "dock_load_before_w": 25750.0,
+    "dock_load_after_w": 25750.0,
+    "sink_m_dot_kg_s": 6.2,
+    "sink_cp_j_kg_k": 4180.0
+  },
+  "disturbances": {
+    "infiltration": {
+      "enabled": true,
+      "start_time_s": 60.0,
+      "delay_s": 60.0,
+      "ramp_time_s": 30.0,
+      "hold_time_s": 60.0,
+      "magnitude_w": 10000.0,
+      "room_fraction": 1.0,
+      "dock_fraction": -1.0
+    }
+  },
+  "control": {
+    "enabled": true,
+    "controllers": [
+      {
+        "name": "B1_room_to_air_pressure_ratio",
+        "enabled": true,
+        "measurement": "room_c",
+        "setpoint": -30.0,
+        "actuator_path": "air_cycle.pressure_ratio",
+        "action": "direct",
+        "bias": 1.2623264797,
+        "gain": 0.0035,
+        "Ti_min": 0.333,
+        "u_min": 1.05,
+        "u_max": 1.4,
+        "anti_windup": true
+      },
+      {
+        "name": "B2_room_to_expansion_valve",
+        "enabled": true,
+        "measurement": "room_c",
+        "setpoint": -30.0,
+        "actuator_path": "vcc_cycle.expansion_valve.opening",
+        "action": "direct",
+        "bias": 0.5,
+        "gain": 0.0095,
+        "Ti_min": 0.333,
+        "u_min": 0.05,
+        "u_max": 1.0,
+        "anti_windup": true
+      },
+      {
+        "name": "B3_condensing_to_vc_compressor_work",
+        "enabled": true,
+        "measurement": "tcond_c",
+        "setpoint": 40.0,
+        "actuator_path": "vcc_cycle.compressor_pressure_ratio",
+        "action": "direct",
+        "bias": 4.387,
+        "gain": 0.03,
+        "Ti_min": 0.333,
+        "u_min": 3.0,
+        "u_max": 6.0,
+        "anti_windup": true
+      }
+    ]
+  },
+  "initial_guess": {
+    "room_c": -30.0,
+    "sink_c": 30.0,
+    "t3_c": 4.0,
+    "t4_c": -15.0,
+    "t6_c": 6.0,
+    "tevap_c": -5.0,
+    "m_ref_kg_s": 0.095625
+  },
+  "output": {
+    "plot_file": "outputs/paper_reference_case.png",
+    "csv_file": "outputs/paper_reference_case.csv"
+  }
+}
