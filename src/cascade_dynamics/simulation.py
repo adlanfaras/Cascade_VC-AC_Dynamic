@@ -207,6 +207,13 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
             frozen_actuator_paths = {item["path"] for item in _startup_free_parameters(startup_cfg)}
     else:
         unknowns = initial_vector(config)
+
+    if startup_snapshot:
+        for controller in config.get("control", {}).get("controllers", []):
+            setpoint_from_startup = controller.get("setpoint_from_startup")
+            if setpoint_from_startup and setpoint_from_startup in startup_snapshot:
+                controller["setpoint"] = float(startup_snapshot[setpoint_from_startup])
+
     control = ControlSystem(config, frozen_actuator_paths=frozen_actuator_paths)
     state = unknowns[:2].copy()
     history: list[dict[str, float]] = []
@@ -253,32 +260,38 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
 
     t_min = np.array([row["time_s"] for row in history]) / 60.0
     room_c = np.array([row["room_c"] for row in history])
+    t2_c = np.array([row["t2_c"] for row in history])
     m_ref_kg_s = np.array([row["m_ref_kg_s"] for row in history])
     m_air_kg_s = np.array([row["m_air_kg_s"] for row in history])
     cop = np.array([row["cop_system"] for row in history])
 
-    fig, axes = plt.subplots(4, 1, figsize=(10, 11), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(10, 13), sharex=True)
 
     axes[0].plot(t_min, room_c, label="Room")
     axes[0].set_ylabel("Temperature [C]")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
-    axes[1].set_ylabel("Mass Flow [kg/s]")
+    axes[1].plot(t_min, t2_c, label="Air after cascade exchanger")
+    axes[1].set_ylabel("Temperature [C]")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
-    axes[2].plot(t_min, m_air_kg_s, label="Air mass flow")
+    axes[2].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
     axes[2].set_ylabel("Mass Flow [kg/s]")
     axes[2].legend()
     axes[2].grid(True, alpha=0.3)
 
-    axes[3].plot(t_min, cop, label="COP")
-    axes[3].set_xlabel("Time [min]")
-    axes[3].set_ylabel("COP")
+    axes[3].plot(t_min, m_air_kg_s, label="Air mass flow")
+    axes[3].set_ylabel("Mass Flow [kg/s]")
     axes[3].legend()
     axes[3].grid(True, alpha=0.3)
+
+    axes[4].plot(t_min, cop, label="COP")
+    axes[4].set_xlabel("Time [min]")
+    axes[4].set_ylabel("COP")
+    axes[4].legend()
+    axes[4].grid(True, alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)

@@ -2,7 +2,7 @@
   "simulation": {
     "t_start_s": 0.0,
     "t_end_s": 300.0,
-    "dt_s": 0.1,
+    "dt_s": 1.0,
     "newton_tol": 1e-5,
     "newton_max_iter": 100,
     "fd_step": 1e-5,
@@ -147,8 +147,9 @@
       {
         "name": "B2_room_to_expansion_valve",
         "enabled": true,
-        "measurement": "room_c",
-        "setpoint": -30.0,
+        "measurement": "t2_c",
+        "setpoint": -15.0,
+        "setpoint_from_startup": "t2_c",
         "actuator_path": "vcc_cycle.expansion_valve.opening",
         "action": "direct",
         "bias": 0.5,
