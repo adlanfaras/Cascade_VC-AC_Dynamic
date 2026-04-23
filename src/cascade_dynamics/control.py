@@ -64,9 +64,10 @@ class PIDController:
 
 
 class ControlSystem:
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], frozen_actuator_paths: set[str] | None = None):
         control_cfg = config.get("control", {})
         self.enabled = control_cfg.get("enabled", False)
+        self.frozen_actuator_paths = frozen_actuator_paths or set()
         self.controllers = [PIDController(item) for item in control_cfg.get("controllers", [])]
 
     def update(self, measurements: dict[str, float], plant_config: dict[str, Any], dt_s: float) -> dict[str, float]:
@@ -74,5 +75,9 @@ class ControlSystem:
             return {}
         outputs: dict[str, float] = {}
         for controller in self.controllers:
+            if controller.cfg["actuator_path"] in self.frozen_actuator_paths:
+                outputs[f"pid_{controller.name}_output"] = float(get_path(plant_config, controller.cfg["actuator_path"]))
+                outputs[f"pid_{controller.name}_frozen"] = 1.0
+                continue
             outputs[f"pid_{controller.name}_output"] = controller.update(measurements, plant_config, dt_s)
         return outputs

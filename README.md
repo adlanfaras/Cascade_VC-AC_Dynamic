@@ -100,10 +100,25 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case.json
 The script prints a short summary and writes plots into `outputs/`.
 
 Before the transient run starts, `simulation.startup_initialization` can run a
-separate steady-state Newton solve. This mode solves the initial temperatures and
-refrigerant mass flow with the sink accumulation term forced to zero, then uses
-that solved vector as the fixed initial condition for the dynamic simulation.
-Disable it with:
+separate startup design-point solve. This mode does not advance time. It fixes
+the configured targets, solves selected startup-only free variables, writes those
+values back into the in-memory config, then freezes them for the dynamic time
+loop. If `freeze_solved_parameters` is true, controllers whose actuator path was
+solved during startup report the frozen value instead of overwriting it.
+
+The startup problem is configured by:
+
+- `targets`: design-point outputs such as room temperature, sink temperature,
+  evaporator temperature, condenser temperature, refrigerant mass flow, and air
+  mass flow
+- `free_state_variables`: internal algebraic temperatures that may move while
+  fitting the operating point
+- `free_parameters`: config paths that may be solved during startup, such as
+  condenser UA, cascade HX UA, expansion-valve opening, VCC compressor pressure
+  ratio, air-cycle pressure ratio, or air-compressor map speed fraction
+
+Startup solved parameters are also copied into the first CSV row as
+`startup_solved_*` snapshot columns. Disable startup initialization with:
 
 ```json
 "startup_initialization": {

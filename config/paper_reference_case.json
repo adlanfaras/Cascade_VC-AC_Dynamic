@@ -7,7 +7,54 @@
     "newton_max_iter": 100,
     "fd_step": 1e-5,
     "startup_initialization": {
-      "enabled": true
+      "enabled": true,
+      "mode": "design_point",
+      "freeze_solved_parameters": true,
+      "targets": {
+        "room_c": -30.0,
+        "sink_c": 35.0,
+        "tevap_c": -5.0,
+        "tcond_c": 40.0,
+        "m_ref_kg_s": 0.095625,
+        "m_air_kg_s": 3.44
+      },
+      "free_state_variables": [
+        "t3_c",
+        "t4_c",
+        "t6_c"
+      ],
+      "free_parameters": [
+        {
+          "path": "vcc_cycle.condenser_ua_w_k",
+          "min": 1000.0,
+          "max": 100000.0
+        },
+        {
+          "path": "vcc_cycle.cascade_ua_w_k",
+          "min": 100.0,
+          "max": 100000.0
+        },
+        {
+          "path": "vcc_cycle.expansion_valve.opening",
+          "min": 0.05,
+          "max": 1.0
+        },
+        {
+          "path": "vcc_cycle.compressor_pressure_ratio",
+          "min": 3.0,
+          "max": 6.0
+        },
+        {
+          "path": "air_cycle.pressure_ratio",
+          "min": 1.01,
+          "max": 1.6
+        },
+        {
+          "path": "air_cycle.compressor_mass_flow.speed_fraction",
+          "min": 0.5,
+          "max": 1.5
+        }
+      ]
     }
   },
   "fluids": {
