@@ -36,8 +36,9 @@ Component models:
 - expansion valve: isenthalpic with linear pressure-drop flow equation
 - bottom-side air flow: compressor head-to-volumetric-flow polynomial with
   suction-density conversion to mass flow, driven by compressor head only
-- ammonia compressor discharge pressure: fixed compressor pressure ratio when
-  `vcc_cycle.compressor_pressure_ratio` is provided
+- ammonia compressor: variable-speed BITZER map using evaporating temperature,
+  condensing temperature, and compressor speed to predict refrigerant mass flow
+  and shaft power
 
 The bottom-side air-cycle layout used by the model is:
 
@@ -65,7 +66,7 @@ The bottom-side air mass flow is computed from the compressor isentropic head:
 ```text
 h_is = h(P2, s1) - h1
 H = h_is / g
-Q = a*H^3 + b*H^2 + c*H + d
+Q = f(H, rpm)
 m_air = rho_suction * Q
 ```
 
@@ -73,23 +74,26 @@ The active compressor map expects:
 
 ```text
 H in meters of isentropic head
+rpm in compressor speed
 Q in m^3/s
 ```
 
-The room controller acts on `air_cycle.pressure_ratio`, so compressor head changes the calculated bottom-cycle mass flow.
+The air-cycle room controller acts on
+`air_cycle.compressor_mass_flow.speed_rpm`, with the design operating point
+centered at `15000 rpm`.
 
-For the ammonia compressor, the configured reference case now uses:
+For the ammonia compressor, the configured reference case now uses a variable
+speed map:
 
 ```text
-p_cond = compressor_pressure_ratio * p_evap
-tcond = Tsat(p_cond)
-h8 = h7 + (h8s - h7) / compressor_eta_is
+mdot_ref = map(tevap, tcond, speed_rpm)
+Wcomp_ref = map(tevap, tcond, speed_rpm)
+Qcond = Qevap_total + Wcomp_ref
 ```
 
-with `compressor_pressure_ratio = 4.387` and `compressor_eta_is = 0.85`.
-This uses the supplied compressor pressure ratio directly for the NH3 discharge
-pressure instead of deriving discharge pressure only from condenser saturation
-temperature.
+The solver treats `tcond_c` as an algebraic variable, gets condensing pressure
+from `Psat(tcond)`, and matches the compressor-map mass flow against the
+expansion-valve flow relation.
 
 ## Run
 
@@ -108,17 +112,20 @@ solved during startup report the frozen value instead of overwriting it.
 
 The startup problem is configured by:
 
-- `targets`: design-point outputs such as room temperature, sink temperature,
-  evaporator temperature, condenser temperature, refrigerant mass flow, and air
-  mass flow
+- `targets`: design-point temperatures for room, sink, evaporator, and
+  condenser
 - `free_state_variables`: internal algebraic temperatures that may move while
-  fitting the operating point
+  fitting the operating point, along with free refrigerant mass flow if it is
+  not listed as a target
 - `free_parameters`: config paths that may be solved during startup, such as
-  condenser UA, cascade HX UA, expansion-valve opening, VCC compressor pressure
-  ratio, air-cycle pressure ratio, or air-compressor map speed fraction
+  condenser UA, cascade HX UA, expansion-valve opening, NH3 compressor speed,
+  air-cycle pressure ratio, or air-compressor speed
 
 Startup solved parameters are also copied into the first CSV row as
-`startup_solved_*` snapshot columns. Disable startup initialization with:
+`startup_solved_*` snapshot columns. For active controllers, the solved actuator
+value is also copied into the controller bias before the transient loop starts,
+so the first controlled step does not jump away from the initialized operating
+point. Disable startup initialization with:
 
 ```json
 "startup_initialization": {
@@ -167,15 +174,13 @@ output = bias + gain * error + gain * integral / Ti
 output = clamp(output, u_min, u_max)
 ```
 
-The current controller mapping follows the diagram at the level exposed by this lumped model:
+The current controller mapping in the reference case is:
 
-- `B1_room_to_air_compressor`: room temperature to air-cycle mass flow, direct action
-- `B3_sink_to_condenser`: sink/condenser temperature to condenser UA, direct action
-- `VC5_dock_to_dock_evaporator`: loading-dock temperature to dock evaporator UA, direct action
-- `VC4_expansion_valve`: evaporating temperature to superheat, reverse action
-- `B4_cascade_hx_outlet`: cascade heat-exchanger outlet temperature to cascade HX UA, reverse action
+- `B1_room_to_air_compressor_speed`: room temperature to air-compressor speed
+- `B2_superheat_to_expansion_valve`: refrigerant superheat to expansion-valve opening
 
-The last two are configured as reverse action to match the requested exceptions.
+So the air-cycle compressor speed adjusts bottom-cycle cooling capacity to hold
+room temperature, while the expansion valve regulates refrigerant superheat.
 
 ## Notes
 
@@ -184,6 +189,6 @@ The last two are configured as reverse action to match the requested exceptions.
 - `config/paper_reference_case.json` uses values recovered from Table 2 of the paper, then translates them into this simplified transient model.
 - Because the paper is primarily a steady-state design study and includes humid-air expansion details and a loading-dock evaporator branch that are not yet fully represented here, a few values are derived approximations:
   - Brayton pressure ratio from the paper temperatures and turbine efficiency under a dry-air fit
-  - ammonia compressor pressure ratio and isentropic efficiency supplied as `4.387` and `0.85`
+  - ammonia compressor performance represented by a variable-speed BITZER map
   - UA values back-calculated from reference duties and terminal temperatures
 - The code is intentionally modular so you can later add more detailed control volumes, pressure dynamics, frost, or more detailed heat exchanger discretization.

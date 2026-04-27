@@ -11,17 +11,18 @@
       "mode": "design_point",
       "freeze_solved_parameters": true,
       "targets": {
-        "room_c": -30.0,
         "sink_c": 35.0,
         "tevap_c": -5.0,
-        "tcond_c": 40.0,
-        "m_ref_kg_s": 0.095625,
-        "m_air_kg_s": 3.44
+        "tcond_c": 40.0
       },
+      "t5_target_c": -30.0,
+      "room_delta_t_target_c": 10.0,
       "free_state_variables": [
+        "room_c",
         "t3_c",
         "t4_c",
-        "t6_c"
+        "t6_c",
+        "m_ref_kg_s"
       ],
       "free_parameters": [
         {
@@ -35,14 +36,20 @@
           "max": 100000.0
         },
         {
-          "path": "vcc_cycle.expansion_valve.opening",
-          "min": 0.05,
-          "max": 1.0
+          "path": "boundary_conditions.load_before_w",
+          "min": 1000.0,
+          "max": 200000.0
         },
         {
-          "path": "vcc_cycle.compressor_pressure_ratio",
-          "min": 3.0,
-          "max": 6.0
+          "path": "vcc_cycle.expansion_valve.opening",
+          "min": 0.05,
+          "max": 1.0,
+          "freeze_in_transient": false
+        },
+        {
+          "path": "vcc_cycle.compressor.speed_rpm",
+          "min": 1226.0,
+          "max": 1610.0
         },
         {
           "path": "air_cycle.pressure_ratio",
@@ -50,9 +57,10 @@
           "max": 1.6
         },
         {
-          "path": "air_cycle.compressor_mass_flow.speed_fraction",
-          "min": 0.5,
-          "max": 1.5
+          "path": "air_cycle.compressor_mass_flow.speed_rpm",
+          "min": 10000.0,
+          "max": 20000.0,
+          "freeze_in_transient": false
         }
       ]
     }
@@ -69,18 +77,12 @@
     "combined_drive_efficiency": 0.9,
     "regenerator_ua_w_k": 27467.429052096,
     "compressor_mass_flow": {
-      "model": "polynomial_volumetric_flow_head",
-      "speed_fraction": 1.0,
+      "model": "polynomial_volumetric_flow_head_speed",
+      "speed_rpm": 15000.0,
+      "design_speed_rpm": 15000.0,
+      "speed_scale_rpm": 5000.0,
       "head_min_m": 642.22,
       "head_max_m": 1067.16,
-      "coefficients": [
-        -4.68291944e-13,
-        1.89586409e-9,
-        -3.06313684e-6,
-        0.00246639302,
-        -0.989827168,
-        162.171682
-      ],
       "q_min_m3_s": 0.0,
       "q_max_m3_s": 10.0,
       "m_dot_min_kg_s": 0.5,
@@ -88,8 +90,13 @@
     }
   },
   "vcc_cycle": {
-    "compressor_pressure_ratio": 4.387,
-    "compressor_eta_is": 0.85,
+    "compressor": {
+      "model": "bitzer_variable_speed_map",
+      "speed_rpm": 1533.0,
+      "speed_min_rpm": 1226.0,
+      "speed_max_rpm": 1610.0,
+      "check_range": true
+    },
     "cascade_ua_w_k": 4216.325690412,
     "dock_evaporator_ua_w_k": 1200.0,
     "condenser_ua_w_k": 18000.0,
@@ -131,46 +138,33 @@
     "enabled": true,
     "controllers": [
       {
-        "name": "B1_room_to_air_pressure_ratio",
+        "name": "B1_room_to_air_compressor_speed",
         "enabled": true,
         "measurement": "room_c",
-        "setpoint": -30.0,
-        "actuator_path": "air_cycle.pressure_ratio",
+        "setpoint": -20.0,
+        "setpoint_from_startup": "room_c",
+        "actuator_path": "air_cycle.compressor_mass_flow.speed_rpm",
         "action": "direct",
-        "bias": 1.2623264797,
-        "gain": 0.0035,
-        "Ti_min": 0.333,
-        "u_min": 1.05,
-        "u_max": 1.4,
+        "bias": 15000.0,
+        "gain": 80.0,
+        "Ti_min": 0.5,
+        "u_min": 10000.0,
+        "u_max": 20000.0,
         "anti_windup": true
       },
       {
-        "name": "B2_room_to_expansion_valve",
+        "name": "B2_superheat_to_expansion_valve",
         "enabled": true,
-        "measurement": "t2_c",
-        "setpoint": -15.0,
-        "setpoint_from_startup": "t2_c",
+        "measurement": "refrigerant_superheat_k",
+        "setpoint": 5.0,
+        "setpoint_from_startup": "refrigerant_superheat_k",
         "actuator_path": "vcc_cycle.expansion_valve.opening",
         "action": "direct",
         "bias": 0.5,
-        "gain": 0.0095,
-        "Ti_min": 0.333,
+        "gain": 0.003,
+        "Ti_min": 1.5,
         "u_min": 0.05,
         "u_max": 1.0,
-        "anti_windup": true
-      },
-      {
-        "name": "B3_condensing_to_vc_compressor_work",
-        "enabled": true,
-        "measurement": "tcond_c",
-        "setpoint": 40.0,
-        "actuator_path": "vcc_cycle.compressor_pressure_ratio",
-        "action": "direct",
-        "bias": 4.387,
-        "gain": 0.03,
-        "Ti_min": 0.333,
-        "u_min": 3.0,
-        "u_max": 6.0,
         "anti_windup": true
       }
     ]
@@ -182,6 +176,7 @@
     "t4_c": -15.0,
     "t6_c": 6.0,
     "tevap_c": -5.0,
+    "tcond_c": 40.0,
     "m_ref_kg_s": 0.095625
   },
   "output": {
