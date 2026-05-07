@@ -148,11 +148,23 @@ Infiltration is configured in JSON under `disturbances.infiltration`.
   "delay_s": 120.0,
   "ramp_time_s": 30.0,
   "hold_time_s": 60.0,
-  "magnitude_w": 10000.0,
+  "magnitude_mode": "percent_of_room_load",
+  "load_percentage": 0.1,
+  "reference_load_path": "boundary_conditions.load_before_w",
   "room_fraction": 1.0,
   "dock_fraction": -1.0
 }
 ```
+
+With `magnitude_mode: "percent_of_room_load"`, the disturbance magnitude is
+resolved after startup initialization, so `load_percentage: 0.1` uses 10% of the
+startup-solved `boundary_conditions.load_before_w`. At full disturbance, the
+room load becomes 110% of the solved room load and the loading-dock evaporator
+load is reduced by the same watt amount. The resolved value is written to CSV as
+`infiltration_magnitude_w`.
+
+Use `magnitude_mode: "fixed_w"` with `magnitude_w` to keep a fixed disturbance
+size instead.
 
 The disturbance starts only after `start_time_s + delay_s`, ramps up linearly over
 `ramp_time_s`, stays at full magnitude for `hold_time_s`, then ramps back down to

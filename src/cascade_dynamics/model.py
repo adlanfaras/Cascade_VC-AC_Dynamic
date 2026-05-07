@@ -97,7 +97,7 @@ class CascadeSystemModel:
             ramp_s=cfg.get("ramp_time_s", 30.0),
             hold_s=cfg.get("hold_time_s", 60.0),
         )
-        magnitude_w = cfg["magnitude_w"] * fraction
+        magnitude_w = cfg.get("resolved_magnitude_w", cfg.get("magnitude_w", 0.0)) * fraction
         return {
             "room_w": magnitude_w * cfg.get("room_fraction", 1.0),
             "dock_w": magnitude_w * cfg.get("dock_fraction", -1.0),
@@ -342,6 +342,8 @@ class CascadeSystemModel:
         t2_c = air["t2_k"] - KELVIN_OFFSET
         t5_c = air["t5_k"] - KELVIN_OFFSET
         t7_c = ref["t7_k"] - KELVIN_OFFSET
+        disturbance = self.infiltration_disturbance_w(time_s)
+        infiltration_cfg = self.cfg.get("disturbances", {}).get("infiltration", {})
 
         values = {
             "time_s": time_s,
@@ -382,8 +384,9 @@ class CascadeSystemModel:
             "cop_room_only": cop_room_only,
             "base_room_load_w": self._base_room_load_w(time_s),
             "base_dock_load_w": self._base_dock_load_w(time_s),
-            "infiltration_room_w": self.infiltration_disturbance_w(time_s)["room_w"],
-            "infiltration_dock_w": self.infiltration_disturbance_w(time_s)["dock_w"],
+            "infiltration_magnitude_w": infiltration_cfg.get("resolved_magnitude_w", infiltration_cfg.get("magnitude_w", 0.0)),
+            "infiltration_room_w": disturbance["room_w"],
+            "infiltration_dock_w": disturbance["dock_w"],
             "load_w": self.load_w(time_s),
             "dock_load_w": self.dock_load_w(time_s),
         }

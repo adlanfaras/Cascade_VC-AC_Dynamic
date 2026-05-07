@@ -1,5 +1,5 @@
 {
-  "cache_version": 2,
+  "cache_version": 3,
   "cost": 1.2594591577999403e-21,
   "free_parameter_values": {
     "air_cycle.compressor_mass_flow.speed_rpm": 10991.571949739093,
@@ -10,7 +10,7 @@
     "vcc_cycle.expansion_valve.opening": 0.5022468946452655
   },
   "iterations": 45,
-  "signature": "105a0390e25a7995fc521dc92e9ec15f3356e464a42079ae0efb7321f6cac33b",
+  "signature": "39cd4e71d3c8c2b21edc7ea0b315afe762b13b64b034470d8c3115ac416e7884",
   "snapshot": {
     "air_compressor_isentropic_head_j_kg": 17145.941265344794,
     "air_compressor_isentropic_head_m": 1748.399429503938,

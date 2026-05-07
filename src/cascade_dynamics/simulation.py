@@ -18,7 +18,7 @@ from .model import CascadeSystemModel
 from .numerics import NewtonSolveError, newton_raphson_fd
 
 
-STARTUP_CACHE_VERSION = 2
+STARTUP_CACHE_VERSION = 3
 
 STATE_INDEX = {
     "room_c": 0,
@@ -36,7 +36,6 @@ DEFAULT_STARTUP_FREE_PARAMETERS = [
     {"path": "vcc_cycle.cascade_ua_w_k", "min": 100.0, "max": 100000.0},
     {"path": "boundary_conditions.load_before_w", "min": 1000.0, "max": 200000.0},
     {"path": "vcc_cycle.expansion_valve.opening", "min": 0.05, "max": 1.0, "freeze_in_transient": False},
-    {"path": "vcc_cycle.compressor.speed_rpm", "min": 1226.0, "max": 1610.0, "freeze_in_transient": False},
     {"path": "air_cycle.pressure_ratio", "min": 1.01, "max": 1.6},
     {"path": "air_cycle.compressor_mass_flow.speed_rpm", "min": 10000.0, "max": 20000.0, "freeze_in_transient": False},
 ]
@@ -149,6 +148,24 @@ def _save_startup_cache(cache_path: Path, payload: dict[str, Any]) -> None:
 def _apply_cached_free_parameters(config: dict[str, Any], free_parameter_values: dict[str, float]) -> None:
     for path, value in free_parameter_values.items():
         set_path(config, path, value)
+
+
+def configure_disturbances(config: dict[str, Any]) -> None:
+    infiltration_cfg = config.get("disturbances", {}).get("infiltration", {})
+    if not infiltration_cfg.get("enabled", False):
+        return
+
+    mode = infiltration_cfg.get("magnitude_mode", "fixed_w")
+    if mode == "fixed_w":
+        infiltration_cfg["resolved_magnitude_w"] = float(infiltration_cfg.get("magnitude_w", 0.0))
+        return
+    if mode != "percent_of_room_load":
+        raise ValueError(f"Unsupported infiltration magnitude_mode: {mode}")
+
+    percentage = float(infiltration_cfg.get("load_percentage", 0.10))
+    reference_path = infiltration_cfg.get("reference_load_path", "boundary_conditions.load_before_w")
+    reference_load_w = float(get_path(config, reference_path))
+    infiltration_cfg["resolved_magnitude_w"] = percentage * reference_load_w
 
 
 def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> StartupInitializationResult:
@@ -411,6 +428,7 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
             if controller.get("bias_from_startup", True) and solved_bias_key in startup_snapshot:
                 controller["bias"] = float(startup_snapshot[solved_bias_key])
 
+    configure_disturbances(plant_config)
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
     state = unknowns[:2].copy()
     history: list[dict[str, float]] = []
