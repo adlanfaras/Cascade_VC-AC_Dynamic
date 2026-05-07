@@ -482,11 +482,12 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
     t_min = np.array([row["time_s"] for row in history]) / 60.0
     room_c = np.array([row["room_c"] for row in history])
     t3_c = np.array([row["t3_c"] for row in history])
+    t5_c = np.array([row["t5_c"] for row in history])
     m_ref_kg_s = np.array([row["m_ref_kg_s"] for row in history])
     m_air_kg_s = np.array([row["m_air_kg_s"] for row in history])
     cop = np.array([row["cop_system"] for row in history])
 
-    fig, axes = plt.subplots(5, 1, figsize=(10, 13), sharex=True)
+    fig, axes = plt.subplots(6, 1, figsize=(10, 15), sharex=True)
 
     axes[0].plot(t_min, room_c, label="Room")
     axes[0].set_ylabel("Temperature [C]")
@@ -498,21 +499,26 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
-    axes[2].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
-    axes[2].set_ylabel("Mass Flow [kg/s]")
+    axes[2].plot(t_min, t5_c, label="Air entering room")
+    axes[2].set_ylabel("Temperature [C]")
     axes[2].legend()
     axes[2].grid(True, alpha=0.3)
 
-    axes[3].plot(t_min, m_air_kg_s, label="Air mass flow")
+    axes[3].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
     axes[3].set_ylabel("Mass Flow [kg/s]")
     axes[3].legend()
     axes[3].grid(True, alpha=0.3)
 
-    axes[4].plot(t_min, cop, label="COP")
-    axes[4].set_xlabel("Time [min]")
-    axes[4].set_ylabel("COP")
+    axes[4].plot(t_min, m_air_kg_s, label="Air mass flow")
+    axes[4].set_ylabel("Mass Flow [kg/s]")
     axes[4].legend()
     axes[4].grid(True, alpha=0.3)
+
+    axes[5].plot(t_min, cop, label="COP")
+    axes[5].set_xlabel("Time [min]")
+    axes[5].set_ylabel("COP")
+    axes[5].legend()
+    axes[5].grid(True, alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)
