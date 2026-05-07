@@ -78,9 +78,9 @@ rpm in compressor speed
 Q in m^3/s
 ```
 
-The air-cycle room controller acts on
-`air_cycle.compressor_mass_flow.speed_rpm`, with the design operating point
-centered at `15000 rpm`.
+The air-cycle controller acts on
+`air_cycle.compressor_mass_flow.speed_rpm`, using the air temperature before
+the room (`t5_c`) as its measurement.
 
 For the ammonia compressor, the configured reference case now uses a variable
 speed map:
@@ -176,11 +176,13 @@ output = clamp(output, u_min, u_max)
 
 The current controller mapping in the reference case is:
 
-- `B1_room_to_air_compressor_speed`: room temperature to air-compressor speed
-- `B2_superheat_to_expansion_valve`: refrigerant superheat to expansion-valve opening
+- `B1_air_before_room_to_air_compressor_speed`: air temperature before entering the room (`t5_c`) to air-compressor speed
+- `B2_air_after_cascade_to_nh3_compressor_speed`: air temperature after leaving the cascade exchanger (`t3_c`) to NH3 compressor speed
+- `B3_superheat_to_expansion_valve`: refrigerant superheat to expansion-valve opening
 
-So the air-cycle compressor speed adjusts bottom-cycle cooling capacity to hold
-room temperature, while the expansion valve regulates refrigerant superheat.
+So the air-cycle compressor speed regulates the air supplied to the room, the
+NH3 compressor speed regulates the air temperature after the cascade exchanger,
+and the expansion valve regulates refrigerant superheat.
 
 ## Notes
 

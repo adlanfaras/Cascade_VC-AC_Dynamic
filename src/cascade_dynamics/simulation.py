@@ -36,7 +36,7 @@ DEFAULT_STARTUP_FREE_PARAMETERS = [
     {"path": "vcc_cycle.cascade_ua_w_k", "min": 100.0, "max": 100000.0},
     {"path": "boundary_conditions.load_before_w", "min": 1000.0, "max": 200000.0},
     {"path": "vcc_cycle.expansion_valve.opening", "min": 0.05, "max": 1.0, "freeze_in_transient": False},
-    {"path": "vcc_cycle.compressor.speed_rpm", "min": 1226.0, "max": 1610.0},
+    {"path": "vcc_cycle.compressor.speed_rpm", "min": 1226.0, "max": 1610.0, "freeze_in_transient": False},
     {"path": "air_cycle.pressure_ratio", "min": 1.01, "max": 1.6},
     {"path": "air_cycle.compressor_mass_flow.speed_rpm", "min": 10000.0, "max": 20000.0, "freeze_in_transient": False},
 ]
@@ -463,7 +463,7 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
 
     t_min = np.array([row["time_s"] for row in history]) / 60.0
     room_c = np.array([row["room_c"] for row in history])
-    t2_c = np.array([row["t2_c"] for row in history])
+    t3_c = np.array([row["t3_c"] for row in history])
     m_ref_kg_s = np.array([row["m_ref_kg_s"] for row in history])
     m_air_kg_s = np.array([row["m_air_kg_s"] for row in history])
     cop = np.array([row["cop_system"] for row in history])
@@ -475,7 +475,7 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(t_min, t2_c, label="Air after cascade exchanger")
+    axes[1].plot(t_min, t3_c, label="Air after cascade exchanger")
     axes[1].set_ylabel("Temperature [C]")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)

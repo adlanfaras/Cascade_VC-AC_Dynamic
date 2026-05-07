@@ -1,0 +1,49 @@
+{
+  "cache_version": 2,
+  "cost": 7.749347892203251e-25,
+  "free_parameter_values": {
+    "air_cycle.compressor_mass_flow.speed_rpm": 11814.950291985746,
+    "air_cycle.pressure_ratio": 1.239119714592827,
+    "boundary_conditions.load_before_w": 45065.50500295064,
+    "vcc_cycle.cascade_ua_w_k": 6027.459827562319,
+    "vcc_cycle.compressor.speed_rpm": 1426.7198610806201,
+    "vcc_cycle.condenser_ua_w_k": 17963.602331390062,
+    "vcc_cycle.expansion_valve.opening": 0.4711208222431288
+  },
+  "iterations": 33,
+  "signature": "ca0e2496f03687a4240712a3c044a495b63d14ad10f9a1504acd0ff8471ad351",
+  "snapshot": {
+    "air_compressor_isentropic_head_j_kg": 17210.522102940828,
+    "air_compressor_isentropic_head_m": 1754.9848422183752,
+    "m_air_kg_s": 4.481667929952437,
+    "m_ref_kg_s": 0.08947930310257549,
+    "refrigerant_superheat_k": 36.44606941509028,
+    "room_c": -19.999999999999982,
+    "sink_c": 35.0,
+    "startup_solved_air_cycle_compressor_mass_flow_speed_rpm": 11814.950291985746,
+    "startup_solved_air_cycle_pressure_ratio": 1.239119714592827,
+    "startup_solved_boundary_conditions_load_before_w": 45065.50500295064,
+    "startup_solved_vcc_cycle_cascade_ua_w_k": 6027.459827562319,
+    "startup_solved_vcc_cycle_compressor_speed_rpm": 1426.7198610806201,
+    "startup_solved_vcc_cycle_condenser_ua_w_k": 17963.602331390062,
+    "startup_solved_vcc_cycle_expansion_valve_opening": 0.4711208222431288,
+    "t2_c": 18.348332980477892,
+    "t3_c": 1.1352901640991528,
+    "t4_c": -17.015481728470053,
+    "t5_c": -29.999999999999858,
+    "t6_c": -1.8394873295186334,
+    "t7_c": 31.446069415090278,
+    "tcond_c": 40.0,
+    "tevap_c": -5.0
+  },
+  "unknowns": [
+    -19.999999999999982,
+    35.0,
+    1.1352901640991528,
+    -17.015481728470053,
+    -1.8394873295186334,
+    -5.0,
+    40.0,
+    0.08947930310257549
+  ]
+}

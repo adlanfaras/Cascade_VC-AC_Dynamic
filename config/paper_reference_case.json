@@ -49,7 +49,8 @@
         {
           "path": "vcc_cycle.compressor.speed_rpm",
           "min": 1226.0,
-          "max": 1610.0
+          "max": 1610.0,
+          "freeze_in_transient": false
         },
         {
           "path": "air_cycle.pressure_ratio",
@@ -138,26 +139,40 @@
     "enabled": true,
     "controllers": [
       {
-        "name": "B1_room_to_air_compressor_speed",
+        "name": "B1_air_before_room_to_air_compressor_speed",
         "enabled": true,
-        "measurement": "room_c",
-        "setpoint": -20.0,
-        "setpoint_from_startup": "room_c",
+        "measurement": "t5_c",
+        "setpoint": -30.0,
+        "setpoint_from_startup": "t5_c",
         "actuator_path": "air_cycle.compressor_mass_flow.speed_rpm",
         "action": "direct",
         "bias": 15000.0,
-        "gain": 80.0,
-        "Ti_min": 0.5,
+        "gain": 20.0,
+        "Ti_min": 2.0,
         "u_min": 10000.0,
         "u_max": 20000.0,
         "anti_windup": true
       },
       {
-        "name": "B2_superheat_to_expansion_valve",
+        "name": "B2_air_after_cascade_to_nh3_compressor_speed",
+        "enabled": true,
+        "measurement": "t3_c",
+        "setpoint": 4.0,
+        "setpoint_from_startup": "t3_c",
+        "actuator_path": "vcc_cycle.compressor.speed_rpm",
+        "action": "direct",
+        "bias": 1533.0,
+        "gain": 2.0,
+        "Ti_min": 2.0,
+        "u_min": 1226.0,
+        "u_max": 1610.0,
+        "anti_windup": true
+      },
+      {
+        "name": "B3_superheat_to_expansion_valve",
         "enabled": true,
         "measurement": "refrigerant_superheat_k",
         "setpoint": 5.0,
-        "setpoint_from_startup": "refrigerant_superheat_k",
         "actuator_path": "vcc_cycle.expansion_valve.opening",
         "action": "direct",
         "bias": 0.5,
