@@ -18,7 +18,7 @@ from .model import CascadeSystemModel
 from .numerics import NewtonSolveError, newton_raphson_fd
 
 
-STARTUP_CACHE_VERSION = 5
+STARTUP_CACHE_VERSION = 6
 
 STATE_INDEX = {
     "room_c": 0,

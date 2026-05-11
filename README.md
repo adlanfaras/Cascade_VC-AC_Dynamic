@@ -31,6 +31,9 @@ The model is organized as a semi-explicit DAE solved with backward Euler in time
 Component models:
 
 - compressor / turbine: isentropic efficiency
+- bottom-side air properties: saturated humid air in the refrigerated space,
+  constant absolute humidity until turbine expansion, and equilibrium
+  vapour-to-ice formation during expansion
 - regenerator / cascade HX / condenser: `UA-LMTD`
 - room load: heater model, `Q_RS = m_air * (h_room_return - h_supply)`
 - loading dock branch: lumped dock air temperature with `UA * (T_dock - T_evap)`
@@ -63,13 +66,26 @@ the regenerator LMTD is based on:
 LMTD_reg = LMTD(T3 - T6, T4 - Troom)
 ```
 
-The bottom-side air mass flow is computed from the compressor isentropic head:
+The bottom-side air mass flow is computed from the compressor isentropic head.
+The humid-air properties are expressed per kg of dry air, so `m_air` is the dry
+air mass flow:
 
 ```text
-h_is = h(P2, s1) - h1
+h_is = J(P2, s1, x_room) - J1
 H = h_is / g
 Q = f(H, rpm)
-m_air = rho_suction * Q
+m_air = rho_dry_air,suction * Q
+```
+
+For the expander, the model follows the paper's humid expansion treatment:
+
+```text
+x_room = x_sat(T_room, P_low) * RH_room
+J = h_air + x_v h_v + x_ice h_ice
+s = s_air + x_v s_v + x_ice s_ice
+x_v = min(x_room, x_sat(T, P))
+x_ice = max(x_room - x_v, 0)
+eta_T = (J4 - J5) / (J4 - J5,is)
 ```
 
 The active compressor map expects:
@@ -207,8 +223,8 @@ and the expansion valve regulates refrigerant superheat.
 - The paper title used as design context is:
   `Cascade refrigeration system with inverse Brayton cycle on the cold side`
 - `config/paper_reference_case.json` uses values recovered from Table 2 of the paper, then translates them into this simplified transient model.
-- Because the paper is primarily a steady-state design study and includes humid-air expansion details and a loading-dock evaporator branch that are not yet fully represented here, a few values are derived approximations:
-  - Brayton pressure ratio from the paper temperatures and turbine efficiency under a dry-air fit
+- Because the paper is primarily a steady-state design study and includes a loading-dock evaporator branch that is represented here with a lumped dynamic model, a few values are derived approximations:
+  - Brayton pressure ratio from the paper temperatures and turbine efficiency under the humid-air expansion model
   - ammonia compressor performance represented by a variable-speed BITZER map
   - UA values back-calculated from reference duties and terminal temperatures
 - The code is intentionally modular so you can later add more detailed control volumes, pressure dynamics, frost, or more detailed heat exchanger discretization.

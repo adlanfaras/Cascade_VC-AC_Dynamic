@@ -73,6 +73,9 @@
     "turbine_eta_is": 0.85,
     "combined_drive_efficiency": 0.9,
     "regenerator_ua_w_k": 27467.429052096,
+    "humid_air": {
+      "room_relative_humidity": 1.0
+    },
     "compressor_mass_flow": {
       "model": "polynomial_volumetric_flow_head_speed",
       "speed_rpm": 15000.0,
@@ -104,7 +107,7 @@
     }
   },
   "thermal_masses": {
-    "room_capacitance_j_k": 2000000.0,
+    "room_capacitance_j_k": 200000.0,
     "dock_capacitance_j_k": 12000000.0,
     "sink_capacitance_j_k": 500000.0
   },
