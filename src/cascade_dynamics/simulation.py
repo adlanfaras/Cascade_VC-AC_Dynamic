@@ -18,7 +18,7 @@ from .model import CascadeSystemModel
 from .numerics import NewtonSolveError, newton_raphson_fd
 
 
-STARTUP_CACHE_VERSION = 3
+STARTUP_CACHE_VERSION = 5
 
 STATE_INDEX = {
     "room_c": 0,
@@ -29,6 +29,7 @@ STATE_INDEX = {
     "tevap_c": 5,
     "tcond_c": 6,
     "m_ref_kg_s": 7,
+    "dock_c": 8,
 }
 
 DEFAULT_STARTUP_FREE_PARAMETERS = [
@@ -92,6 +93,7 @@ def initial_vector(config: dict) -> np.ndarray:
             guess["tevap_c"],
             guess["tcond_c"],
             guess["m_ref_kg_s"],
+            guess.get("dock_c", config["boundary_conditions"]["dock_initial_c"]),
         ],
         dtype=float,
     )
@@ -274,26 +276,21 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
     def scaled_balance_residual_fn(x: np.ndarray) -> np.ndarray:
         unknowns = apply_design_variables(x)
         balance = model.startup_balance_residual(unknowns, time_s)
-        return np.array(
-            [
-                balance[0] / scales["w"],
-                balance[1] / scales["w"],
-                balance[2] / scales["w"],
-                balance[3] / scales["w"],
-                balance[4] / scales["w"],
-                balance[5] / scales["w"],
-                balance[6] / scales["kg_s"],
-                balance[7] / scales["kg_s"],
-            ],
-            dtype=float,
-        )
+        scaled = []
+        for idx, value in enumerate(balance):
+            scale = scales["kg_s"] if idx >= len(balance) - 2 else scales["w"]
+            scaled.append(value / scale)
+        return np.asarray(scaled, dtype=float)
 
     room_delta_t_target_c = startup_cfg.get("room_delta_t_target_c")
     t5_target_c = startup_cfg.get("t5_target_c")
-    startup_residual_size = 8
+    superheat_target_k = startup_cfg.get("superheat_target_k")
+    startup_residual_size = len(model.startup_balance_residual(fixed_unknowns, time_s))
     if room_delta_t_target_c is not None:
         startup_residual_size += 1
     if t5_target_c is not None:
+        startup_residual_size += 1
+    if superheat_target_k is not None:
         startup_residual_size += 1
 
     def startup_residual_fn(x: np.ndarray) -> np.ndarray:
@@ -301,7 +298,7 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
             residual = scaled_balance_residual_fn(x)
         except ValueError:
             return np.full(startup_residual_size, 1.0e6, dtype=float)
-        if room_delta_t_target_c is None:
+        if room_delta_t_target_c is None and t5_target_c is None and superheat_target_k is None:
             return residual
         unknowns = apply_design_variables(x)
         try:
@@ -313,6 +310,8 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
             extra_residuals.append((metrics["t5_c"] - float(t5_target_c)) / scales["temperature_c"])
         if room_delta_t_target_c is not None:
             extra_residuals.append(((metrics["room_c"] - metrics["t5_c"]) - float(room_delta_t_target_c)) / scales["delta_t_c"])
+        if superheat_target_k is not None:
+            extra_residuals.append((metrics["refrigerant_superheat_k"] - float(superheat_target_k)) / scales["delta_t_c"])
         return np.concatenate([residual, np.asarray(extra_residuals, dtype=float)])
 
     result = least_squares(
@@ -430,7 +429,7 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
 
     configure_disturbances(plant_config)
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
-    state = unknowns[:2].copy()
+    state = np.array([unknowns[0], unknowns[1], unknowns[8]], dtype=float)
     history: list[dict[str, float]] = []
 
     _log(f"[run] steps={len(times) - 1} dt={dt_s:.1f}s interval={progress_interval}")
@@ -481,44 +480,52 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
 
     t_min = np.array([row["time_s"] for row in history]) / 60.0
     room_c = np.array([row["room_c"] for row in history])
+    dock_c = np.array([row["dock_c"] for row in history])
     t3_c = np.array([row["t3_c"] for row in history])
     t5_c = np.array([row["t5_c"] for row in history])
     m_ref_kg_s = np.array([row["m_ref_kg_s"] for row in history])
     m_air_kg_s = np.array([row["m_air_kg_s"] for row in history])
     cop = np.array([row["cop_system"] for row in history])
 
-    fig, axes = plt.subplots(6, 1, figsize=(10, 15), sharex=True)
+    fig, axes = plt.subplots(7, 1, figsize=(10, 17), sharex=True)
+    for ax in axes:
+        ax.ticklabel_format(axis="y", useOffset=False)
 
     axes[0].plot(t_min, room_c, label="Room")
     axes[0].set_ylabel("Temperature [C]")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(t_min, t3_c, label="Air after cascade exchanger")
+    axes[1].plot(t_min, dock_c, label="Loading dock")
     axes[1].set_ylabel("Temperature [C]")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
-    axes[2].plot(t_min, t5_c, label="Air entering room")
+    axes[2].plot(t_min, t3_c, label="Air after cascade exchanger")
     axes[2].set_ylabel("Temperature [C]")
     axes[2].legend()
     axes[2].grid(True, alpha=0.3)
 
-    axes[3].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
-    axes[3].set_ylabel("Mass Flow [kg/s]")
+    axes[3].plot(t_min, t5_c, label="Air entering room")
+    axes[3].set_ylabel("Temperature [C]")
     axes[3].legend()
     axes[3].grid(True, alpha=0.3)
 
-    axes[4].plot(t_min, m_air_kg_s, label="Air mass flow")
+    axes[4].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
     axes[4].set_ylabel("Mass Flow [kg/s]")
     axes[4].legend()
     axes[4].grid(True, alpha=0.3)
 
-    axes[5].plot(t_min, cop, label="COP")
-    axes[5].set_xlabel("Time [min]")
-    axes[5].set_ylabel("COP")
+    axes[5].plot(t_min, m_air_kg_s, label="Air mass flow")
+    axes[5].set_ylabel("Mass Flow [kg/s]")
     axes[5].legend()
     axes[5].grid(True, alpha=0.3)
+
+    axes[6].plot(t_min, cop, label="COP")
+    axes[6].set_xlabel("Time [min]")
+    axes[6].set_ylabel("COP")
+    axes[6].legend()
+    axes[6].grid(True, alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)

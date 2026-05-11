@@ -1,8 +1,8 @@
 {
   "simulation": {
     "t_start_s": 0.0,
-    "t_end_s": 300.0,
-    "dt_s": 1.0,
+    "t_end_s": 420.0,
+    "dt_s": 0.5,
     "newton_tol": 1e-5,
     "newton_max_iter": 100,
     "fd_step": 1e-5,
@@ -11,12 +11,14 @@
       "mode": "design_point",
       "freeze_solved_parameters": true,
       "targets": {
+        "dock_c": 5.0,
         "sink_c": 35.0,
         "tevap_c": -5.0,
         "tcond_c": 40.0
       },
       "t5_target_c": -30.0,
       "room_delta_t_target_c": 10.0,
+      "superheat_target_k": 5.0,
       "free_state_variables": [
         "room_c",
         "t3_c",
@@ -93,7 +95,7 @@
       "check_range": true
     },
     "cascade_ua_w_k": 4216.325690412,
-    "dock_evaporator_ua_w_k": 1200.0,
+    "dock_evaporator_ua_w_k": 2575.0,
     "condenser_ua_w_k": 18000.0,
     "subcooling_k": 0.0,
     "expansion_valve": {
@@ -102,8 +104,8 @@
     }
   },
   "thermal_masses": {
-    "room_capacitance_j_k": 850000.0,
-    "dock_capacitance_j_k": 650000.0,
+    "room_capacitance_j_k": 2000000.0,
+    "dock_capacitance_j_k": 12000000.0,
     "sink_capacitance_j_k": 500000.0
   },
   "boundary_conditions": {
@@ -125,10 +127,10 @@
       "ramp_time_s": 10.0,
       "hold_time_s": 60.0,
       "magnitude_mode": "percent_of_room_load",
-      "load_percentage": 0.1,
+      "load_percentage": 0.5,
       "reference_load_path": "boundary_conditions.load_before_w",
       "room_fraction": 1.0,
-      "dock_fraction": -1.0
+      "dock_fraction": 0.0
     }
   },
   "control": {
@@ -172,10 +174,12 @@
         "actuator_path": "vcc_cycle.expansion_valve.opening",
         "action": "direct",
         "bias": 0.5,
-        "gain": 0.003,
+        "gain": 0.0003,
         "Ti_min": 1.5,
         "u_min": 0.05,
         "u_max": 1.0,
+        "actuator_time_constant_s": 5.0,
+        "actuator_rate_limit_per_s": 0.002,
         "anti_windup": true
       }
     ]
@@ -188,7 +192,8 @@
     "t6_c": 6.0,
     "tevap_c": -5.0,
     "tcond_c": 40.0,
-    "m_ref_kg_s": 0.095625
+    "m_ref_kg_s": 0.095625,
+    "dock_c": 5.0
   },
   "output": {
     "plot_file": "outputs/paper_reference_case.png",

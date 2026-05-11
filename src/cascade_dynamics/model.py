@@ -26,10 +26,12 @@ class CascadeSystemModel:
         self.ref_fluid = config["fluids"]["refrigerant"]
 
     def _constraint_penalty(self, unknowns: np.ndarray) -> np.ndarray:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
         penalties = [
             max(0.0, -83.15 - room_c),
             max(0.0, room_c - 46.85),
+            max(0.0, -50.0 - dock_c),
+            max(0.0, dock_c - 46.85),
             max(0.0, -3.15 - sink_c),
             max(0.0, sink_c - 86.85),
             max(0.0, -73.15 - tevap_c),
@@ -41,10 +43,10 @@ class CascadeSystemModel:
         ]
         penalty_sum = sum(penalties)
         if penalty_sum < 1.0e-7:
-            return np.zeros(8, dtype=float)
+            return np.zeros(9, dtype=float)
         scale = 1.0e6
         p0 = 1.0e3 + scale * penalty_sum
-        return np.full(8, p0, dtype=float)
+        return np.full(9, p0, dtype=float)
 
     def _base_room_load_w(self, time_s: float) -> float:
         bc = self.cfg["boundary_conditions"]
@@ -110,7 +112,7 @@ class CascadeSystemModel:
         return self._base_dock_load_w(time_s) + self.infiltration_disturbance_w(time_s)["dock_w"]
 
     def startup_evaluation(self, unknowns: np.ndarray, time_s: float) -> tuple[np.ndarray, dict[str, float]]:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -124,7 +126,8 @@ class CascadeSystemModel:
         ambient_c = bc["ambient_c"]
 
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
-        ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], self.dock_load_w(time_s))
+        q_dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
 
         t2_c = air["t2_k"] - KELVIN_OFFSET
         reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
@@ -139,6 +142,7 @@ class CascadeSystemModel:
         balances = np.array(
             [
                 air["q_room"] - self.load_w(time_s),
+                q_dock_evap - self.dock_load_w(time_s),
                 ref["q_cond"] - sink_rejection,
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -152,6 +156,7 @@ class CascadeSystemModel:
 
         metrics = {
             "room_c": room_c,
+            "dock_c": dock_c,
             "sink_c": sink_c,
             "t2_c": t2_c,
             "t3_c": t3_c,
@@ -163,6 +168,7 @@ class CascadeSystemModel:
             "tcond_c": tcond_c,
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
+            "q_dock_w": q_dock_evap,
             "refrigerant_superheat_k": ref["superheat_k"],
             "air_compressor_isentropic_head_j_kg": air["compressor_head_is"],
             "air_compressor_isentropic_head_m": air["compressor_head_is"] / 9.80665,
@@ -257,9 +263,13 @@ class CascadeSystemModel:
             "speed_rpm": float(compressor_cfg["speed_rpm"]),
         }
 
+    def _evaluate_dock_evaporator(self, dock_c: float, tevap_c: float) -> float:
+        ua_w_k = float(self.cfg["vcc_cycle"].get("dock_evaporator_ua_w_k", 0.0))
+        return ua_w_k * max(dock_c - tevap_c, 0.0)
+
     def residual(self, unknowns: np.ndarray, prev_state: np.ndarray, time_s: float, dt_s: float) -> np.ndarray:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref = unknowns
-        prev_room_c, prev_sink_c = prev_state
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
+        prev_room_c, prev_sink_c, prev_dock_c = prev_state
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -280,9 +290,10 @@ class CascadeSystemModel:
 
         try:
             air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
-            ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], self.dock_load_w(time_s))
+            q_dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+            ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
         except ValueError:
-            return np.full(8, 1.0e9, dtype=float)
+            return np.full(9, 1.0e9, dtype=float)
 
         t2_c = air["t2_k"] - KELVIN_OFFSET
         reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
@@ -296,7 +307,8 @@ class CascadeSystemModel:
 
         res = np.array(
             [
-                air["q_room"] - self.load_w(time_s),
+                room_c - prev_room_c - dt_s * (self.load_w(time_s) - air["q_room"]) / caps["room_capacitance_j_k"],
+                dock_c - prev_dock_c - dt_s * (self.dock_load_w(time_s) - q_dock_evap) / caps["dock_capacitance_j_k"],
                 sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -310,7 +322,7 @@ class CascadeSystemModel:
         return res
 
     def steady_state_residual(self, unknowns: np.ndarray, time_s: float) -> np.ndarray:
-        steady_state = unknowns[:2]
+        steady_state = np.array([unknowns[0], unknowns[1], unknowns[8]], dtype=float)
         return self.residual(unknowns, steady_state, time_s, dt_s=1.0)
 
     def startup_balance_residual(self, unknowns: np.ndarray, time_s: float) -> np.ndarray:
@@ -322,7 +334,7 @@ class CascadeSystemModel:
         return metrics
 
     def post_process(self, unknowns: np.ndarray, time_s: float) -> StepResult:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -331,9 +343,8 @@ class CascadeSystemModel:
         tevap_k = tevap_c + KELVIN_OFFSET
         tcond_k = tcond_c + KELVIN_OFFSET
         air_cfg = self.cfg["air_cycle"]
-        bc = self.cfg["boundary_conditions"]
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
-        q_dock = self.dock_load_w(time_s)
+        q_dock = self._evaluate_dock_evaporator(dock_c, tevap_c)
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock)
         air_input_power = (air["w_air_comp"] - air["w_air_turb"]) / max(air_cfg.get("combined_drive_efficiency", 1.0), 1.0e-6)
         useful_cooling = air["q_room"] + q_dock
@@ -348,7 +359,7 @@ class CascadeSystemModel:
         values = {
             "time_s": time_s,
             "room_c": room_c,
-            "dock_c": bc["dock_initial_c"],
+            "dock_c": dock_c,
             "sink_c": sink_c,
             "t2_c": t2_c,
             "t3_c": t3_c,
@@ -390,4 +401,4 @@ class CascadeSystemModel:
             "load_w": self.load_w(time_s),
             "dock_load_w": self.dock_load_w(time_s),
         }
-        return StepResult(values=values, state_vector=np.array([room_c, sink_c], dtype=float))
+        return StepResult(values=values, state_vector=np.array([room_c, sink_c, dock_c], dtype=float))

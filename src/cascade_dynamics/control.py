@@ -37,6 +37,23 @@ class PIDController:
     def enabled(self) -> bool:
         return self.cfg.get("enabled", True)
 
+    def _apply_actuator_dynamics(self, target_output: float, plant_config: dict[str, Any], dt_s: float) -> float:
+        previous_output = float(get_path(plant_config, self.cfg["actuator_path"]))
+        output = target_output
+
+        time_constant_s = float(self.cfg.get("actuator_time_constant_s", 0.0))
+        if time_constant_s > 0.0:
+            alpha = min(max(dt_s / time_constant_s, 0.0), 1.0)
+            output = previous_output + alpha * (target_output - previous_output)
+
+        rate_limit_per_s = self.cfg.get("actuator_rate_limit_per_s")
+        if rate_limit_per_s is not None:
+            max_delta = abs(float(rate_limit_per_s)) * dt_s
+            delta = min(max(output - previous_output, -max_delta), max_delta)
+            output = previous_output + delta
+
+        return min(max(output, float(self.cfg["u_min"])), float(self.cfg["u_max"]))
+
     def update(self, measurements: dict[str, float], plant_config: dict[str, Any], dt_s: float) -> float:
         if not self.enabled:
             return float(get_path(plant_config, self.cfg["actuator_path"]))
@@ -56,9 +73,10 @@ class PIDController:
         raw_output = bias + gain * error
         raw_output += gain * (proposed_integral / (ti_min * 60.0))
 
-        output = min(max(raw_output, float(self.cfg["u_min"])), float(self.cfg["u_max"]))
-        if output == raw_output or not self.cfg.get("anti_windup", True):
+        target_output = min(max(raw_output, float(self.cfg["u_min"])), float(self.cfg["u_max"]))
+        if target_output == raw_output or not self.cfg.get("anti_windup", True):
             self.state.integral = proposed_integral
+        output = self._apply_actuator_dynamics(target_output, plant_config, dt_s)
         set_path(plant_config, self.cfg["actuator_path"], output)
         return output
 

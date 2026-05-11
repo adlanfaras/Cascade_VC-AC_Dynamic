@@ -18,9 +18,10 @@ The implementation uses:
 The model is organized as a semi-explicit DAE solved with backward Euler in time:
 
 - Dynamic states:
+  - refrigerated room / compressor inlet temperature
+  - loading-dock air temperature
   - condenser sink outlet / lumped sink temperature
 - Algebraic variables:
-  - refrigerated room / compressor inlet temperature from the room heater load
   - air-cycle regenerator outlet temperatures
   - air temperature entering the turbine
   - air supply temperature to the cold room
@@ -32,7 +33,8 @@ Component models:
 - compressor / turbine: isentropic efficiency
 - regenerator / cascade HX / condenser: `UA-LMTD`
 - room load: heater model, `Q_RS = m_air * (h_room_return - h_supply)`
-- loading dock branch: direct heater/load on the refrigerant side, `Q_LD(t)`
+- loading dock branch: lumped dock air temperature with `UA * (T_dock - T_evap)`
+  evaporator heat removal
 - expansion valve: isenthalpic with linear pressure-drop flow equation
 - bottom-side air flow: compressor head-to-volumetric-flow polynomial with
   suction-density conversion to mass flow, driven by compressor head only
@@ -112,8 +114,10 @@ solved during startup report the frozen value instead of overwriting it.
 
 The startup problem is configured by:
 
-- `targets`: design-point temperatures for room, sink, evaporator, and
-  condenser
+- `targets`: design-point temperatures for room, loading dock, sink,
+  evaporator, and condenser
+- optional targets such as `t5_target_c`, `room_delta_t_target_c`, and
+  `superheat_target_k`
 - `free_state_variables`: internal algebraic temperatures that may move while
   fitting the operating point, along with free refrigerant mass flow if it is
   not listed as a target
@@ -152,15 +156,16 @@ Infiltration is configured in JSON under `disturbances.infiltration`.
   "load_percentage": 0.1,
   "reference_load_path": "boundary_conditions.load_before_w",
   "room_fraction": 1.0,
-  "dock_fraction": -1.0
+  "dock_fraction": 0.0
 }
 ```
 
 With `magnitude_mode: "percent_of_room_load"`, the disturbance magnitude is
 resolved after startup initialization, so `load_percentage: 0.1` uses 10% of the
 startup-solved `boundary_conditions.load_before_w`. At full disturbance, the
-room load becomes 110% of the solved room load and the loading-dock evaporator
-load is reduced by the same watt amount. The resolved value is written to CSV as
+room load becomes 110% of the solved room load. With `dock_fraction: 0.0`, the
+loading-dock evaporator load is unchanged, so infiltration increases total
+evaporator load. The resolved value is written to CSV as
 `infiltration_magnitude_w`.
 
 Use `magnitude_mode: "fixed_w"` with `magnitude_w` to keep a fixed disturbance
@@ -168,8 +173,7 @@ size instead.
 
 The disturbance starts only after `start_time_s + delay_s`, ramps up linearly over
 `ramp_time_s`, stays at full magnitude for `hold_time_s`, then ramps back down to
-zero over the same `ramp_time_s`. With the fractions above, it increases room load
-and decreases dock load by the same amount.
+zero over the same `ramp_time_s`.
 
 ## PI Control
 
@@ -182,7 +186,9 @@ The implemented discrete form is:
 error = measurement - setpoint
 if action == "reverse": error = -error
 integral = integral + error * dt
-output = bias + gain * error + gain * integral / Ti
+target = bias + gain * error + gain * integral / Ti
+target = clamp(target, u_min, u_max)
+output = apply optional actuator lag and rate limit
 output = clamp(output, u_min, u_max)
 ```
 
