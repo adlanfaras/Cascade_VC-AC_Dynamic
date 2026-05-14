@@ -122,11 +122,30 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case.json
 The script prints a short summary and writes plots into `outputs/`.
 
 Before the transient run starts, `simulation.startup_initialization` can run a
-separate startup design-point solve. This mode does not advance time. It fixes
-the configured targets, solves selected startup-only free variables, writes those
-values back into the in-memory config, then freezes them for the dynamic time
-loop. If `freeze_solved_parameters` is true, controllers whose actuator path was
-solved during startup report the frozen value instead of overwriting it.
+separate startup design-point solve. This mode does not advance time. It writes
+startup values back into the in-memory config, then freezes them for the dynamic
+time loop. If `freeze_solved_parameters` is true, controllers whose actuator
+path was solved during startup report the frozen value instead of overwriting it.
+
+The reference case uses `mode: "paper_design_point"`. In this mode the
+bottom-cycle air temperatures are constructed from the paper equations:
+
+```text
+T5 = TRS - DT5-6
+T3 = Tevap + DTeva,min
+T4 = T3 - eR * (T3 - TRS)
+T1 = TRS + eR * (T3 - TRS)
+```
+
+In this codebase, `room_c` corresponds to `TRS`, and `t6_c` corresponds to the
+compressor inlet `T1`. The initializer then solves the pressure ratio that gives
+the target humid-air turbine outlet temperature, solves the air-compressor speed
+to match the paper top-cycle cooling capacity (`Qf-VC = 103 kW` in the
+reference case), and back-calculates the room load, heat-exchanger UAs, sink
+flow, refrigerant mass flow, and expansion-valve opening so the coupled model
+starts from that paper-like state. With `solve_refrigerant_compressor_speed:
+false`, the NH3 compressor remains at the configured reference speed and its
+map mass flow is used.
 
 The startup problem is configured by:
 
@@ -134,6 +153,8 @@ The startup problem is configured by:
   evaporator, and condenser
 - optional targets such as `t5_target_c`, `room_delta_t_target_c`, and
   `superheat_target_k`
+- paper-mode targets such as `cascade_air_evap_min_delta_t_c`,
+  `regenerator_effectiveness`, and `target_vcc_cooling_capacity_w`
 - `free_state_variables`: internal algebraic temperatures that may move while
   fitting the operating point, along with free refrigerant mass flow if it is
   not listed as a target
@@ -170,21 +191,18 @@ Infiltration is configured in JSON under `disturbances.infiltration`.
   "hold_time_s": 60.0,
   "magnitude_mode": "percent_of_room_load",
   "load_percentage": 0.1,
-  "reference_load_path": "boundary_conditions.load_before_w",
-  "room_fraction": 1.0,
-  "dock_fraction": 0.0
+  "reference_load_path": "boundary_conditions.load_before_w"
 }
 ```
 
 With `magnitude_mode: "percent_of_room_load"`, the disturbance magnitude is
-resolved after startup initialization, so `load_percentage: 0.1` uses 10% of the
-startup-solved `boundary_conditions.load_before_w`. At full disturbance, the
-room load becomes 110% of the solved room load. With `dock_fraction: 0.0`, the
-loading-dock evaporator load is unchanged, so infiltration increases total
-evaporator load. The resolved value is written to CSV as
-`infiltration_magnitude_w`.
+resolved after startup initialization, so `load_percentage: 0.1` uses 10% of
+the startup-solved `boundary_conditions.load_before_w`. The disturbance is then
+applied as an equal-and-opposite room-to-dock exchange pulse: the room gets a
+positive load and the dock gets the same magnitude with the opposite sign.
+The resolved value is written to CSV as `infiltration_magnitude_w`.
 
-Use `magnitude_mode: "fixed_w"` with `magnitude_w` to keep a fixed disturbance
+Use `magnitude_mode: "fixed_w"` with `magnitude_w` to keep a fixed calibration
 size instead.
 
 The disturbance starts only after `start_time_s + delay_s`, ramps up linearly over

@@ -8,17 +8,22 @@
     "fd_step": 1e-5,
     "startup_initialization": {
       "enabled": true,
-      "mode": "design_point",
+      "mode": "paper_design_point",
       "freeze_solved_parameters": true,
       "targets": {
+        "room_c": -30.0,
         "dock_c": 5.0,
         "sink_c": 35.0,
         "tevap_c": -5.0,
         "tcond_c": 40.0
       },
-      "t5_target_c": -30.0,
+      "t5_target_c": -40.0,
       "room_delta_t_target_c": 10.0,
+      "cascade_air_evap_min_delta_t_c": 10.0,
+      "regenerator_effectiveness": 0.9,
+      "target_vcc_cooling_capacity_w": 103000.0,
       "superheat_target_k": 5.0,
+      "solve_refrigerant_compressor_speed": false,
       "free_state_variables": [
         "room_c",
         "t3_c",
@@ -38,9 +43,19 @@
           "max": 100000.0
         },
         {
+          "path": "air_cycle.regenerator_ua_w_k",
+          "min": 100.0,
+          "max": 100000.0
+        },
+        {
           "path": "boundary_conditions.load_before_w",
           "min": 1000.0,
           "max": 200000.0
+        },
+        {
+          "path": "boundary_conditions.sink_m_dot_kg_s",
+          "min": 0.1,
+          "max": 30.0
         },
         {
           "path": "vcc_cycle.expansion_valve.opening",
@@ -82,7 +97,7 @@
       "design_speed_rpm": 15000.0,
       "speed_scale_rpm": 5000.0,
       "head_min_m": 642.22,
-      "head_max_m": 1067.16,
+      "head_max_m": 3000.0,
       "q_min_m3_s": 0.0,
       "q_max_m3_s": 10.0,
       "m_dot_min_kg_s": 0.5,
@@ -131,9 +146,7 @@
       "hold_time_s": 60.0,
       "magnitude_mode": "percent_of_room_load",
       "load_percentage": 0.5,
-      "reference_load_path": "boundary_conditions.load_before_w",
-      "room_fraction": 1.0,
-      "dock_fraction": 0.0
+      "reference_load_path": "boundary_conditions.load_before_w"
     }
   },
   "control": {

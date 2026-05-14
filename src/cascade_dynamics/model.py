@@ -106,9 +106,10 @@ class CascadeSystemModel:
             hold_s=cfg.get("hold_time_s", 60.0),
         )
         magnitude_w = cfg.get("resolved_magnitude_w", cfg.get("magnitude_w", 0.0)) * fraction
+        exchange_w = magnitude_w
         return {
-            "room_w": magnitude_w * cfg.get("room_fraction", 1.0),
-            "dock_w": magnitude_w * cfg.get("dock_fraction", -1.0),
+            "room_w": exchange_w,
+            "dock_w": -exchange_w,
         }
 
     def load_w(self, time_s: float) -> float:
@@ -133,6 +134,7 @@ class CascadeSystemModel:
 
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
         q_dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        infiltration = self.infiltration_disturbance_w(time_s)
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
 
         t2_c = air["t2_k"] - KELVIN_OFFSET
@@ -174,6 +176,8 @@ class CascadeSystemModel:
             "tcond_c": tcond_c,
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
+            "infiltration_room_w": infiltration["room_w"],
+            "infiltration_dock_w": infiltration["dock_w"],
             "humidity_ratio_room_kg_kg_da": air["humidity_ratio_room"],
             "humidity_ratio_supply_vapor_kg_kg_da": air["humidity_ratio_5_vapor"],
             "humidity_ratio_supply_ice_kg_kg_da": air["humidity_ratio_5_ice"],
@@ -331,11 +335,13 @@ class CascadeSystemModel:
         q_cascade_ua = vcc_cfg["cascade_ua_w_k"] * cascade_lmtd
         q_cond_ua = vcc_cfg["condenser_ua_w_k"] * condenser_lmtd
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
+        room_load_w = self.load_w(time_s)
+        dock_load_w = self.dock_load_w(time_s)
 
         res = np.array(
             [
-                room_c - prev_room_c - dt_s * (self.load_w(time_s) - air["q_room"]) / caps["room_capacitance_j_k"],
-                dock_c - prev_dock_c - dt_s * (self.dock_load_w(time_s) - q_dock_evap) / caps["dock_capacitance_j_k"],
+                room_c - prev_room_c - dt_s * (room_load_w - air["q_room"]) / caps["room_capacitance_j_k"],
+                dock_c - prev_dock_c - dt_s * (dock_load_w - q_dock_evap) / caps["dock_capacitance_j_k"],
                 sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -372,6 +378,7 @@ class CascadeSystemModel:
         air_cfg = self.cfg["air_cycle"]
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
         q_dock = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        infiltration = self.infiltration_disturbance_w(time_s)
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock)
         air_input_power = (air["w_air_comp"] - air["w_air_turb"]) / max(air_cfg.get("combined_drive_efficiency", 1.0), 1.0e-6)
         useful_cooling = air["q_room"] + q_dock
@@ -380,7 +387,6 @@ class CascadeSystemModel:
         t2_c = air["t2_k"] - KELVIN_OFFSET
         t5_c = air["t5_k"] - KELVIN_OFFSET
         t7_c = ref["t7_k"] - KELVIN_OFFSET
-        disturbance = self.infiltration_disturbance_w(time_s)
         infiltration_cfg = self.cfg.get("disturbances", {}).get("infiltration", {})
 
         values = {
@@ -428,8 +434,8 @@ class CascadeSystemModel:
             "base_room_load_w": self._base_room_load_w(time_s),
             "base_dock_load_w": self._base_dock_load_w(time_s),
             "infiltration_magnitude_w": infiltration_cfg.get("resolved_magnitude_w", infiltration_cfg.get("magnitude_w", 0.0)),
-            "infiltration_room_w": disturbance["room_w"],
-            "infiltration_dock_w": disturbance["dock_w"],
+            "infiltration_room_w": infiltration["room_w"],
+            "infiltration_dock_w": infiltration["dock_w"],
             "load_w": self.load_w(time_s),
             "dock_load_w": self.dock_load_w(time_s),
         }
