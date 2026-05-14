@@ -14,6 +14,7 @@ from .humid_air import (
     state_at_enthalpy,
     state_at_entropy,
 )
+from .infiltration import TianInfiltrationState, advance_tian_infiltration, air_density, zero_infiltration_result
 
 
 KELVIN_OFFSET = 273.15
@@ -30,6 +31,70 @@ class CascadeSystemModel:
         self.cfg = config
         self.air_fluid = config["fluids"]["air"]
         self.ref_fluid = config["fluids"]["refrigerant"]
+        self._infiltration_state = TianInfiltrationState()
+        self._current_infiltration = zero_infiltration_result()
+
+    def _infiltration_cfg(self) -> dict:
+        return self.cfg.get("disturbances", {}).get("infiltration", {})
+
+    def _uses_tian_infiltration(self) -> bool:
+        cfg = self._infiltration_cfg()
+        mode = str(cfg.get("model", cfg.get("magnitude_mode", ""))).lower()
+        return cfg.get("enabled", False) and mode in {"tian", "tian_unsteady", "tian_analytical"}
+
+    def _room_humidity_ratio(self, room_k: float, pressure_pa: float) -> float | None:
+        humidity_cfg = self.cfg["air_cycle"].get("humid_air", {})
+        x_room = humidity_cfg.get("humidity_ratio")
+        if x_room is not None:
+            return float(x_room)
+        relative_humidity = humidity_cfg.get("room_relative_humidity")
+        if relative_humidity is not None:
+            return saturated_room_humidity_ratio(room_k, pressure_pa, float(relative_humidity))
+        return None
+
+    def reset_infiltration_disturbance(self, room_c: float, dock_c: float) -> None:
+        cfg = self._infiltration_cfg()
+        if not self._uses_tian_infiltration():
+            self._current_infiltration = zero_infiltration_result()
+            return
+        p_i = float(cfg.get("P_i", cfg.get("indoor_pressure_pa", self.cfg["air_cycle"]["p_low_pa"])))
+        room_k = room_c + KELVIN_OFFSET
+        omega_room = self._room_humidity_ratio(room_k, p_i)
+        rho_i = air_density(room_k, p_i, omega_room)
+        self._infiltration_state = TianInfiltrationState(density_kg_m3=rho_i)
+        self._current_infiltration = zero_infiltration_result()
+        self._current_infiltration["region_density_kg_m3"] = self._infiltration_state.density_kg_m3
+
+    def advance_infiltration_disturbance(self, time_s: float, dt_s: float, previous_values: dict[str, float]) -> None:
+        if not self._uses_tian_infiltration():
+            return
+
+        cfg = self._infiltration_cfg()
+        room_c = float(previous_values["room_c"])
+        outdoor_source = str(cfg.get("outdoor_source", "dock")).lower()
+        if outdoor_source == "ambient":
+            outdoor_c = float(self.cfg["boundary_conditions"]["ambient_c"])
+        elif outdoor_source == "fixed":
+            outdoor_c = float(cfg.get("outdoor_c", cfg.get("T_o_c", self.cfg["boundary_conditions"]["ambient_c"])))
+        else:
+            outdoor_c = float(previous_values.get("dock_c", self.cfg["boundary_conditions"]["dock_initial_c"]))
+
+        p_i = float(cfg.get("P_i", cfg.get("indoor_pressure_pa", self.cfg["air_cycle"]["p_low_pa"])))
+        p_o = float(cfg.get("P_o", cfg.get("outdoor_pressure_pa", p_i)))
+        room_k = room_c + KELVIN_OFFSET
+        omega_room = self._room_humidity_ratio(room_k, p_i)
+
+        self._current_infiltration = advance_tian_infiltration(
+            cfg,
+            self._infiltration_state,
+            time_s=time_s,
+            dt_s=dt_s,
+            room_c=room_c,
+            outdoor_c=outdoor_c,
+            pressure_i_pa=p_i,
+            pressure_o_pa=p_o,
+            omega_room=omega_room,
+        )
 
     def _constraint_penalty(self, unknowns: np.ndarray) -> np.ndarray:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
@@ -94,9 +159,12 @@ class CascadeSystemModel:
         return 0.0
 
     def infiltration_disturbance_w(self, time_s: float) -> dict[str, float]:
-        cfg = self.cfg.get("disturbances", {}).get("infiltration", {})
+        cfg = self._infiltration_cfg()
         if not cfg.get("enabled", False):
-            return {"room_w": 0.0, "dock_w": 0.0}
+            return zero_infiltration_result()
+
+        if self._uses_tian_infiltration():
+            return self._current_infiltration
 
         fraction = self._delayed_trapezoid_fraction(
             time_s,
@@ -110,6 +178,16 @@ class CascadeSystemModel:
         return {
             "room_w": exchange_w,
             "dock_w": -exchange_w,
+            "q_m3_s": 0.0,
+            "q_sensible_w": exchange_w,
+            "q_latent_w": 0.0,
+            "q_total_w": exchange_w,
+            "cumulative_volume_m3": 0.0,
+            "velocity_m_s": 0.0,
+            "region_density_kg_m3": 0.0,
+            "stage": 0.0,
+            "door_open_fraction": fraction,
+            "effective_length_m": 0.0,
         }
 
     def load_w(self, time_s: float) -> float:
@@ -436,6 +514,21 @@ class CascadeSystemModel:
             "infiltration_magnitude_w": infiltration_cfg.get("resolved_magnitude_w", infiltration_cfg.get("magnitude_w", 0.0)),
             "infiltration_room_w": infiltration["room_w"],
             "infiltration_dock_w": infiltration["dock_w"],
+            "infiltration_q_m3_s": infiltration.get("q_m3_s", 0.0),
+            "infiltration_q_unprotected_m3_s": infiltration.get("q_unprotected_m3_s", infiltration.get("q_m3_s", 0.0)),
+            "infiltration_sensible_w": infiltration.get("q_sensible_w", 0.0),
+            "infiltration_latent_w": infiltration.get("q_latent_w", 0.0),
+            "infiltration_total_w": infiltration.get("q_total_w", infiltration["room_w"]),
+            "infiltration_cumulative_volume_m3": infiltration.get("cumulative_volume_m3", 0.0),
+            "infiltration_velocity_m_s": infiltration.get("velocity_m_s", 0.0),
+            "infiltration_region_density_kg_m3": infiltration.get("region_density_kg_m3", 0.0),
+            "infiltration_indoor_density_kg_m3": infiltration.get("rho_indoor_kg_m3", 0.0),
+            "infiltration_outdoor_density_kg_m3": infiltration.get("rho_outdoor_kg_m3", 0.0),
+            "infiltration_room_humidity_ratio_kg_kg_da": infiltration.get("omega_room_kg_kg_da", 0.0),
+            "infiltration_outdoor_humidity_ratio_kg_kg_da": infiltration.get("omega_outdoor_kg_kg_da", 0.0),
+            "infiltration_stage": infiltration.get("stage", 0.0),
+            "infiltration_door_open_fraction": infiltration.get("door_open_fraction", 0.0),
+            "infiltration_effective_length_m": infiltration.get("effective_length_m", 0.0),
             "load_w": self.load_w(time_s),
             "dock_load_w": self.dock_load_w(time_s),
         }

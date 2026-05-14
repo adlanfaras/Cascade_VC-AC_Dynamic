@@ -175,6 +175,9 @@ def configure_disturbances(config: dict[str, Any]) -> None:
         return
 
     mode = infiltration_cfg.get("magnitude_mode", "fixed_w")
+    model = str(infiltration_cfg.get("model", mode)).lower()
+    if model in {"tian", "tian_unsteady", "tian_analytical"}:
+        return
     if mode == "fixed_w":
         infiltration_cfg["resolved_magnitude_w"] = float(infiltration_cfg.get("magnitude_w", 0.0))
     elif mode == "percent_of_room_load":
@@ -745,6 +748,7 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
                 controller["bias"] = float(startup_snapshot[solved_bias_key])
 
     configure_disturbances(plant_config)
+    model.reset_infiltration_disturbance(float(unknowns[0]), float(unknowns[8]))
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
     state = np.array([unknowns[0], unknowns[1], unknowns[8]], dtype=float)
     history: list[dict[str, float]] = []
@@ -770,6 +774,7 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
             continue
 
         prev_state = state.copy()
+        model.advance_infiltration_disturbance(time_s, dt_s, history[-1])
         controller_outputs = control.update(history[-1], plant_config, dt_s)
 
         def residual_fn(x: np.ndarray) -> np.ndarray:

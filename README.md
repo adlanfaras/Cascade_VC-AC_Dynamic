@@ -182,6 +182,82 @@ Kelvin internally only where CoolProp requires absolute temperature.
 
 Infiltration is configured in JSON under `disturbances.infiltration`.
 
+The preferred door-opening model is the Tian-style unsteady analytical model:
+
+```json
+{
+  "enabled": true,
+  "model": "tian_unsteady",
+  "t_open_s": 60.0,
+  "t_close_s": 140.0,
+  "outdoor_source": "dock",
+  "outdoor_relative_humidity": 0.65,
+  "effectiveness": 0.0,
+  "door": {
+    "width_m": 1.2,
+    "height_m": 2.2
+  },
+  "room": {
+    "width_m": 6.0,
+    "length_m": 10.0,
+    "height_m": 3.0
+  }
+}
+```
+
+This mode integrates three door-event states:
+
+```text
+v(t)   = representative infiltration velocity [m/s]
+rho(t) = average air density in the door infiltration region [kg/m^3]
+I(t)   = cumulative infiltrated volume [m^3]
+```
+
+The airflow reported to CSV is:
+
+```text
+Q_inf = v * A_flow
+A_flow = W_d * H_d / 2
+```
+
+During an open event, the model uses buoyancy pressure, door pressure, and
+friction/local resistance terms to generate the expected transient pulse:
+rapid rise, peak, then gradual decay while the door remains open. The cumulative
+volume switches the lower outgoing stream from initial cold room air to the
+mixed infiltration-region density after `I >= V_eff`. Set
+`stage_smoothing_m3` to a positive value to smooth that switch.
+
+The room receives:
+
+```text
+q_total = Q_inf * rho_o * Cp_air * (T_o - T_room)
+        + Q_inf * rho_o * max(omega_o - omega_room, 0) * h_latent
+```
+
+and the dock receives the equal-and-opposite load, preserving the coupled
+room-to-dock exchange logic. With `outdoor_source: "dock"`, `T_o` follows the
+dynamic dock temperature. Use `outdoor_source: "ambient"` for the configured
+ambient temperature or `outdoor_source: "fixed"` with `outdoor_c`.
+
+The effective infiltration length defaults to the conservative fallback
+`L_el = L_c`. If a calibrated or paper-specific maximum is available, set
+`L_max_m` or directly set `effective_length_m`.
+
+CSV output includes:
+
+```text
+infiltration_q_m3_s
+infiltration_sensible_w
+infiltration_latent_w
+infiltration_total_w
+infiltration_cumulative_volume_m3
+infiltration_velocity_m_s
+infiltration_region_density_kg_m3
+infiltration_stage
+```
+
+The older fixed-magnitude pulse is still available:
+
 ```json
 {
   "enabled": true,

@@ -140,13 +140,25 @@
   "disturbances": {
     "infiltration": {
       "enabled": true,
-      "start_time_s": 0.0,
-      "delay_s": 60.0,
-      "ramp_time_s": 10.0,
-      "hold_time_s": 60.0,
-      "magnitude_mode": "percent_of_room_load",
-      "load_percentage": 0.5,
-      "reference_load_path": "boundary_conditions.load_before_w"
+      "model": "tian_unsteady",
+      "t_open_s": 60.0,
+      "t_close_s": 140.0,
+      "outdoor_source": "dock",
+      "outdoor_relative_humidity": 0.65,
+      "effectiveness": 0.0,
+      "door": {
+        "width_m": 1.2,
+        "height_m": 2.2
+      },
+      "room": {
+        "width_m": 6.0,
+        "length_m": 10.0,
+        "height_m": 3.0
+      },
+      "lambda_f": 0.025,
+      "xi_sum": 4.0,
+      "stage_smoothing_m3": 0.0,
+      "integration_max_step_s": 0.05
     }
   },
   "control": {
