@@ -39,11 +39,10 @@ Component models:
 - loading dock branch: lumped dock air temperature with `UA * (T_dock - T_evap)`
   evaporator heat removal
 - expansion valve: isenthalpic with linear pressure-drop flow equation
-- bottom-side air flow: compressor head-to-volumetric-flow polynomial with
-  suction-density conversion to mass flow, driven by compressor head only
-- ammonia compressor: variable-speed BITZER map using evaporating temperature,
-  condensing temperature, and compressor speed to predict refrigerant mass flow
-  and shaft power
+- bottom-side air compressor: variable-speed head-to-volumetric-flow polynomial
+  with a perfect-damper option that holds dry-air mass flow constant
+- ammonia compressor: BITZER W6FA-K R717 variable-speed map for cooling
+  capacity, shaft power, and refrigerant mass flow
 
 The bottom-side air-cycle layout used by the model is:
 
@@ -66,16 +65,22 @@ the regenerator LMTD is based on:
 LMTD_reg = LMTD(T3 - T6, T4 - Troom)
 ```
 
-The bottom-side air mass flow is computed from the compressor isentropic head.
-The humid-air properties are expressed per kg of dry air, so `m_air` is the dry
-air mass flow:
+The reference case uses the perfect-damper air-flow mode. The humid-air
+properties are expressed per kg of dry air, so `m_air` is the dry-air mass flow.
+In this mode `m_air` is held at `fixed_m_dot_kg_s`, compressor speed selects
+the map head that corresponds to that flow, and the pressure ratio is then
+derived from the isentropic head:
 
 ```text
-h_is = J(P2, s1, x_room) - J1
-H = h_is / g
-Q = f(H, rpm)
-m_air = rho_dry_air,suction * Q
+m_air = fixed_m_dot_kg_s
+Q_target = m_air / rho_dry_air,suction
+H = inverse_map(Q_target, rpm)
+h_is = H * g
+P2/P1 = pressure ratio that gives J(P2, s1, x_room) - J1 = h_is
 ```
+
+So `air_cycle.pressure_ratio` is not constant in this mode; it is reported to
+CSV as `air_pressure_ratio`.
 
 For the expander, the model follows the paper's humid expansion treatment:
 
@@ -100,18 +105,20 @@ The air-cycle controller acts on
 `air_cycle.compressor_mass_flow.speed_rpm`, using the air temperature before
 the room (`t5_c`) as its measurement.
 
-For the ammonia compressor, the configured reference case now uses a variable
-speed map:
+For the ammonia compressor, the configured reference case uses the variable-speed
+BITZER map:
 
 ```text
-mdot_ref = map(tevap, tcond, speed_rpm)
-Wcomp_ref = map(tevap, tcond, speed_rpm)
+map = f(tevap, tcond, speed_rpm)
+mdot_ref = map.mdot_kg_s
+Wcomp_ref = map.P_W
 Qcond = Qevap_total + Wcomp_ref
 ```
 
 The solver treats `tcond_c` as an algebraic variable, gets condensing pressure
-from `Psat(tcond)`, and matches the compressor-map mass flow against the
-expansion-valve flow relation.
+from `Psat(tcond)`, and matches both the compressor-map mass flow and the
+expansion-valve flow relation against the refrigerant mass flow. The NH3
+capacity controller acts on `vcc_cycle.compressor.speed_rpm`.
 
 ## Run
 
@@ -138,14 +145,12 @@ T1 = TRS + eR * (T3 - TRS)
 ```
 
 In this codebase, `room_c` corresponds to `TRS`, and `t6_c` corresponds to the
-compressor inlet `T1`. The initializer then solves the pressure ratio that gives
-the target humid-air turbine outlet temperature, solves the air-compressor speed
-to match the paper top-cycle cooling capacity (`Qf-VC = 103 kW` in the
-reference case), and back-calculates the room load, heat-exchanger UAs, sink
-flow, refrigerant mass flow, and expansion-valve opening so the coupled model
-starts from that paper-like state. With `solve_refrigerant_compressor_speed:
-false`, the NH3 compressor remains at the configured reference speed and its
-map mass flow is used.
+compressor inlet `T1`. In the perfect-damper air mode, the initializer solves
+the air-compressor speed that gives the target humid-air turbine outlet
+temperature, then derives the matching pressure ratio from the compressor map.
+It also back-calculates the room load, heat-exchanger UAs, sink flow,
+refrigerant compressor speed, refrigerant mass flow, and expansion-valve opening
+so the coupled model starts from that paper-like state.
 
 The startup problem is configured by:
 
@@ -160,7 +165,8 @@ The startup problem is configured by:
   not listed as a target
 - `free_parameters`: config paths that may be solved during startup, such as
   condenser UA, cascade HX UA, expansion-valve opening, NH3 compressor speed,
-  air-cycle pressure ratio, or air-compressor speed
+  sink flow, air-cycle pressure ratio when it is configured directly, or
+  air-compressor speed
 
 Startup solved parameters are also copied into the first CSV row as
 `startup_solved_*` snapshot columns. For active controllers, the solved actuator
@@ -220,12 +226,13 @@ Q_inf = v * A_flow
 A_flow = W_d * H_d / 2
 ```
 
+The configured opening fraction is applied immediately at `t_open_s` and held
+constant until `t_close_s`, matching Tian's fixed door-opening cases.
 During an open event, the model uses buoyancy pressure, door pressure, and
 friction/local resistance terms to generate the expected transient pulse:
 rapid rise, peak, then gradual decay while the door remains open. The cumulative
 volume switches the lower outgoing stream from initial cold room air to the
-mixed infiltration-region density after `I >= V_eff`. Set
-`stage_smoothing_m3` to a positive value to smooth that switch.
+mixed infiltration-region density after `I >= V_eff`.
 
 The room receives:
 
@@ -307,10 +314,12 @@ The current controller mapping in the reference case is:
 - `B1_air_before_room_to_air_compressor_speed`: air temperature before entering the room (`t5_c`) to air-compressor speed
 - `B2_air_after_cascade_to_nh3_compressor_speed`: air temperature after leaving the cascade exchanger (`t3_c`) to NH3 compressor speed
 - `B3_superheat_to_expansion_valve`: refrigerant superheat to expansion-valve opening
+- `B4_condensing_temperature_to_sink_flow`: condensing temperature (`tcond_c`) to condenser sink mass flow
 
 So the air-cycle compressor speed regulates the air supplied to the room, the
 NH3 compressor speed regulates the air temperature after the cascade exchanger,
-and the expansion valve regulates refrigerant superheat.
+the expansion valve regulates refrigerant superheat, and the sink-flow loop
+holds the initial condensing temperature.
 
 ## Notes
 
@@ -319,6 +328,6 @@ and the expansion valve regulates refrigerant superheat.
 - `config/paper_reference_case.json` uses values recovered from Table 2 of the paper, then translates them into this simplified transient model.
 - Because the paper is primarily a steady-state design study and includes a loading-dock evaporator branch that is represented here with a lumped dynamic model, a few values are derived approximations:
   - Brayton pressure ratio from the paper temperatures and turbine efficiency under the humid-air expansion model
-  - ammonia compressor performance represented by a variable-speed BITZER map
+  - ammonia compressor performance represented by a BITZER variable-speed map
   - UA values back-calculated from reference duties and terminal temperatures
 - The code is intentionally modular so you can later add more detailed control volumes, pressure dynamics, frost, or more detailed heat exchanger discretization.

@@ -120,21 +120,13 @@ def ammonia_compressor_map(tc_k: float, to_k: float, speed_rpm: float, check_ran
     return outputs
 
 
-def mass_flow_from_isentropic_head(
-    config: dict[str, Any],
-    head_j_kg: float,
-    suction_density_kg_m3: float | None = None,
-) -> float:
-    if suction_density_kg_m3 is None:
-        raise ValueError("suction_density_kg_m3 is required for volumetric compressor flow maps.")
-
-    head_m = head_j_kg / GRAVITY_M_S2
+def volumetric_flow_from_head(config: dict[str, Any], head_m: float) -> float:
     model = config.get("model", "polynomial_volumetric_flow_head")
     head_min_m = float(config.get("head_min_m", head_m))
     head_max_m = float(config.get("head_max_m", head_m))
     head_eval_m = min(max(head_m, head_min_m), head_max_m)
 
-    if model == "polynomial_volumetric_flow_head_speed":
+    if model in {"polynomial_volumetric_flow_head_speed", "polynomial_volumetric_flow_head_speed_constant_mass_flow"}:
         h = head_eval_m / 1000.0
         rpm = float(config["speed_rpm"])
         design_speed_rpm = float(config.get("design_speed_rpm", 15000.0))
@@ -164,8 +156,71 @@ def mass_flow_from_isentropic_head(
 
     volumetric_flow_m3_s = max(float(config.get("q_min_m3_s", 0.0)), volumetric_flow_m3_s)
     volumetric_flow_m3_s = min(float(config.get("q_max_m3_s", 1.0e9)), volumetric_flow_m3_s)
+    return volumetric_flow_m3_s
 
+
+def mass_flow_from_isentropic_head(
+    config: dict[str, Any],
+    head_j_kg: float,
+    suction_density_kg_m3: float | None = None,
+) -> float:
+    if suction_density_kg_m3 is None:
+        raise ValueError("suction_density_kg_m3 is required for volumetric compressor flow maps.")
+
+    head_m = head_j_kg / GRAVITY_M_S2
+    volumetric_flow_m3_s = volumetric_flow_from_head(config, head_m)
     mass_flow = volumetric_flow_m3_s * suction_density_kg_m3
     mass_flow = max(float(config.get("m_dot_min_kg_s", 0.0)), mass_flow)
     mass_flow = min(float(config.get("m_dot_max_kg_s", 1.0e9)), mass_flow)
     return mass_flow
+
+
+def head_from_mass_flow(
+    config: dict[str, Any],
+    target_m_dot_kg_s: float,
+    suction_density_kg_m3: float,
+) -> tuple[float, float]:
+    if suction_density_kg_m3 <= 0.0:
+        raise ValueError("suction_density_kg_m3 must be positive.")
+
+    head_min_m = float(config["head_min_m"])
+    head_max_m = float(config["head_max_m"])
+    target_m_dot = float(target_m_dot_kg_s)
+
+    def residual(head_m: float) -> float:
+        return volumetric_flow_from_head(config, head_m) * suction_density_kg_m3 - target_m_dot
+
+    sample_heads = np.linspace(head_min_m, head_max_m, 200)
+    sample_residuals = np.array([residual(float(head_m)) for head_m in sample_heads], dtype=float)
+    best_idx = int(np.argmin(np.abs(sample_residuals)))
+
+    bracket: tuple[float, float] | None = None
+    for idx in range(len(sample_heads) - 1):
+        f_lo = sample_residuals[idx]
+        f_hi = sample_residuals[idx + 1]
+        if f_lo == 0.0:
+            head = float(sample_heads[idx])
+            return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
+        if f_lo * f_hi <= 0.0:
+            bracket = (float(sample_heads[idx]), float(sample_heads[idx + 1]))
+            break
+
+    if bracket is None:
+        head = float(sample_heads[best_idx])
+        return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
+
+    lo, hi = bracket
+    f_lo = residual(lo)
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        f_mid = residual(mid)
+        if abs(f_mid) <= 1.0e-9 or abs(hi - lo) <= 1.0e-7:
+            return mid, volumetric_flow_from_head(config, mid) * suction_density_kg_m3
+        if f_lo * f_mid <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+            f_lo = f_mid
+
+    head = 0.5 * (lo + hi)
+    return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3

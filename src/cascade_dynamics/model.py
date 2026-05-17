@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from CoolProp.CoolProp import PropsSI
 
-from .compressor_map import ammonia_compressor_map, mass_flow_from_isentropic_head
+from .compressor_map import ammonia_compressor_map, head_from_mass_flow, mass_flow_from_isentropic_head
 from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actual_enthalpy
 from .fluids import h_refrigerant_liquid, p_sat
 from .humid_air import (
@@ -235,7 +235,7 @@ class CascadeSystemModel:
                 air["q_cascade"] - q_cascade_ua,
                 ref["q_cond"] - q_cond_ua,
                 m_ref - ref["m_ref_valve"],
-                m_ref - ref["map_m_ref_kg_s"],
+                m_ref - ref["m_ref_compressor"],
             ],
             dtype=float,
         )
@@ -254,6 +254,8 @@ class CascadeSystemModel:
             "tcond_c": tcond_c,
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
+            "air_pressure_ratio": air["pressure_ratio"],
+            "air_compressor_map_mass_flow_kg_s": air["m_air_map"],
             "infiltration_room_w": infiltration["room_w"],
             "infiltration_dock_w": infiltration["dock_w"],
             "humidity_ratio_room_kg_kg_da": air["humidity_ratio_room"],
@@ -262,15 +264,57 @@ class CascadeSystemModel:
             "ice_mass_flow_kg_s": air["ice_mass_flow"],
             "q_dock_w": q_dock_evap,
             "refrigerant_superheat_k": ref["superheat_k"],
+            "refrigerant_compressor_work_w": ref["w_ref_comp"],
+            "refrigerant_compressor_isentropic_work_w": ref["w_ref_isentropic"],
+            "refrigerant_compressor_eta_is_target": ref["eta_is_target"],
+            "refrigerant_compressor_eta_is_effective": ref["eta_is_effective"],
+            "refrigerant_compressor_speed_rpm": ref["compressor_speed_rpm"],
+            "refrigerant_compressor_map_capacity_w": ref["compressor_map_q_w"],
             "air_compressor_isentropic_head_j_kg": air["compressor_head_is"],
             "air_compressor_isentropic_head_m": air["compressor_head_is"] / 9.80665,
         }
         return balances, metrics
 
+    def _pressure_from_isentropic_head(
+        self,
+        p1: float,
+        x_room: float,
+        entropy_j_kg_da_k: float,
+        h1_j_kg_da: float,
+        target_head_j_kg: float,
+    ) -> float:
+        air_cfg = self.cfg["air_cycle"]
+        flow_cfg = air_cfg["compressor_mass_flow"]
+        lower_pr = float(flow_cfg.get("pressure_ratio_min", air_cfg.get("pressure_ratio_min", 1.001)))
+        upper_pr = float(flow_cfg.get("pressure_ratio_max", air_cfg.get("pressure_ratio_max", 2.0)))
+
+        def residual(pressure_ratio: float) -> float:
+            state2s = state_at_entropy(p1 * pressure_ratio, x_room, entropy_j_kg_da_k)
+            return state2s.enthalpy_j_kg_da - h1_j_kg_da - target_head_j_kg
+
+        lo = max(lower_pr, 1.000001)
+        hi = max(upper_pr, lo)
+        f_lo = residual(lo)
+        f_hi = residual(hi)
+        if f_lo * f_hi > 0.0:
+            return p1 * (lo if abs(f_lo) <= abs(f_hi) else hi)
+
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            f_mid = residual(mid)
+            if abs(f_mid) <= 1.0e-7 or abs(hi - lo) <= 1.0e-9:
+                return p1 * mid
+            if f_lo * f_mid <= 0.0:
+                hi = mid
+                f_hi = f_mid
+            else:
+                lo = mid
+                f_lo = f_mid
+        return p1 * (0.5 * (lo + hi))
+
     def _evaluate_air_cycle(self, room_k: float, t3_k: float, t4_k: float, t6_k: float) -> dict[str, float]:
         air_cfg = self.cfg["air_cycle"]
         p1 = air_cfg["p_low_pa"]
-        p2 = p1 * air_cfg["pressure_ratio"]
         humidity_cfg = air_cfg.get("humid_air", {})
         relative_humidity = humidity_cfg.get("room_relative_humidity", 1.0)
         x_room = humidity_cfg.get("humidity_ratio")
@@ -280,12 +324,32 @@ class CascadeSystemModel:
 
         state_room = humid_air_state(room_k, p1, x_room)
         state1 = humid_air_state(t6_k, p1, x_room)
-        state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
         h1 = state1.enthalpy_j_kg_da
-        h2s = state2s.enthalpy_j_kg_da
-        compressor_head_is = h2s - h1
         rho1 = state1.dry_air_density_kg_m3
-        m_air = mass_flow_from_isentropic_head(air_cfg["compressor_mass_flow"], compressor_head_is, rho1)
+        flow_cfg = air_cfg["compressor_mass_flow"]
+        flow_model = flow_cfg.get("model", "polynomial_volumetric_flow_head")
+        map_m_air = 0.0
+        if flow_model == "polynomial_volumetric_flow_head_speed_constant_mass_flow":
+            m_air = float(flow_cfg["fixed_m_dot_kg_s"])
+            head_m, map_m_air = head_from_mass_flow(flow_cfg, m_air, rho1)
+            compressor_head_is = head_m * 9.80665
+            p2 = self._pressure_from_isentropic_head(
+                p1,
+                x_room,
+                state1.entropy_j_kg_da_k,
+                h1,
+                compressor_head_is,
+            )
+            state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
+            h2s = state2s.enthalpy_j_kg_da
+            compressor_head_is = h2s - h1
+        else:
+            p2 = p1 * air_cfg["pressure_ratio"]
+            state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
+            h2s = state2s.enthalpy_j_kg_da
+            compressor_head_is = h2s - h1
+            m_air = mass_flow_from_isentropic_head(flow_cfg, compressor_head_is, rho1)
+            map_m_air = m_air
         h2 = compressor_actual_enthalpy(h1, h2s, air_cfg["compressor_eta_is"])
         state2 = state_at_enthalpy(p2, x_room, h2)
         t2_k = state2.temperature_k
@@ -307,6 +371,7 @@ class CascadeSystemModel:
         return {
             "p1": p1,
             "p2": p2,
+            "pressure_ratio": p2 / p1,
             "h1": h1,
             "h2": h2,
             "h3": h3,
@@ -317,6 +382,7 @@ class CascadeSystemModel:
             "t2_k": t2_k,
             "t5_k": t5_k,
             "m_air": m_air,
+            "m_air_map": map_m_air,
             "rho1": rho1,
             "rho1_mixture": state1.mixture_density_kg_m3,
             "humidity_ratio_room": x_room,
@@ -342,15 +408,29 @@ class CascadeSystemModel:
         evap_total = q_cascade + q_dock
         h7 = h10 + evap_total / max(m_ref, 1.0e-6)
         t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
+        s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
         superheat_k = t7_k - tevap_k
         compressor_cfg = vcc_cfg["compressor"]
-        map_result = ammonia_compressor_map(
-            tcond_k,
-            tevap_k,
-            compressor_cfg["speed_rpm"],
-            check_range=compressor_cfg.get("check_range", True),
-        )
-        w_ref_comp = map_result["P_W"]
+        compressor_eta_is = float(compressor_cfg.get("eta_is", 1.0))
+        h8s = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
+        w_ref_isentropic = m_ref * (h8s - h7)
+        compressor_speed_rpm = float(compressor_cfg.get("speed_rpm", 0.0))
+        compressor_map_q_w = 0.0
+        m_ref_compressor = m_ref
+        if compressor_cfg.get("model", "simple_isentropic") == "bitzer_variable_speed_map":
+            compressor_map = ammonia_compressor_map(
+                tcond_k,
+                tevap_k,
+                compressor_speed_rpm,
+                check_range=bool(compressor_cfg.get("check_range", False)),
+            )
+            compressor_map_q_w = compressor_map["Q_W"]
+            w_ref_comp = compressor_map["P_W"]
+            m_ref_compressor = compressor_map["mdot_kg_s"]
+        else:
+            w_ref_comp = float(compressor_cfg.get("work_w", w_ref_isentropic / max(compressor_eta_is, 1.0e-6)))
+        h8 = h7 + w_ref_comp / max(m_ref, 1.0e-6)
+        t8_k = float(PropsSI("T", "P", p_cond, "H", h8, self.ref_fluid))
         q_cond = evap_total + w_ref_comp
         valve_cfg = vcc_cfg["expansion_valve"]
         m_ref_valve = valve_cfg["flow_coefficient_kg_s_pa"] * valve_cfg["opening"] * max(p_cond - p_evap, 0.0)
@@ -361,15 +441,18 @@ class CascadeSystemModel:
             "h10": h10,
             "h7": h7,
             "t7_k": t7_k,
+            "t8_k": t8_k,
             "superheat_k": superheat_k,
             "q_evap_total": evap_total,
             "q_cond": q_cond,
             "w_ref_comp": w_ref_comp,
-            "map_q_w": map_result["Q_W"],
-            "map_m_ref_kg_s": map_result["mdot_kg_s"],
-            "map_cop": map_result["COP"],
+            "w_ref_isentropic": w_ref_isentropic,
+            "eta_is_effective": w_ref_isentropic / max(w_ref_comp, 1.0e-6),
+            "eta_is_target": compressor_eta_is,
             "m_ref_valve": m_ref_valve,
-            "speed_rpm": float(compressor_cfg["speed_rpm"]),
+            "m_ref_compressor": m_ref_compressor,
+            "compressor_speed_rpm": compressor_speed_rpm,
+            "compressor_map_q_w": compressor_map_q_w,
         }
 
     def _evaluate_dock_evaporator(self, dock_c: float, tevap_c: float) -> float:
@@ -426,7 +509,7 @@ class CascadeSystemModel:
                 air["q_cascade"] - q_cascade_ua,
                 ref["q_cond"] - q_cond_ua,
                 m_ref - ref["m_ref_valve"],
-                m_ref - ref["map_m_ref_kg_s"],
+                m_ref - ref["m_ref_compressor"],
             ],
             dtype=float,
         )
@@ -489,8 +572,14 @@ class CascadeSystemModel:
             "w_air_turb_w": air["w_air_turb"],
             "w_air_input_w": air_input_power,
             "w_ref_comp_w": ref["w_ref_comp"],
+            "w_ref_isentropic_w": ref["w_ref_isentropic"],
+            "refrigerant_compressor_speed_rpm": ref["compressor_speed_rpm"],
+            "refrigerant_compressor_map_capacity_w": ref["compressor_map_q_w"],
+            "refrigerant_compressor_eta_is_effective": ref["eta_is_effective"],
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
+            "air_pressure_ratio": air["pressure_ratio"],
+            "air_compressor_map_mass_flow_kg_s": air["m_air_map"],
             "air_compressor_suction_density_kg_m3": air["rho1"],
             "air_compressor_suction_mixture_density_kg_m3": air["rho1_mixture"],
             "air_compressor_volumetric_flow_m3_s": air["m_air"] / max(air["rho1"], 1.0e-9),
@@ -501,12 +590,13 @@ class CascadeSystemModel:
             "humidity_ratio_supply_ice_kg_kg_da": air["humidity_ratio_5_ice"],
             "ice_mass_flow_kg_s": air["ice_mass_flow"],
             "valve_flow_kg_s": ref["m_ref_valve"],
+            "compressor_map_flow_kg_s": ref["m_ref_compressor"],
             "valve_opening": self.cfg["vcc_cycle"]["expansion_valve"]["opening"],
             "refrigerant_superheat_k": ref["superheat_k"],
-            "refrigerant_compressor_speed_rpm": ref["speed_rpm"],
-            "refrigerant_map_mass_flow_kg_s": ref["map_m_ref_kg_s"],
-            "refrigerant_map_capacity_w": ref["map_q_w"],
-            "refrigerant_map_cop": ref["map_cop"],
+            "refrigerant_compressor_work_w": ref["w_ref_comp"],
+            "refrigerant_compressor_isentropic_work_w": ref["w_ref_isentropic"],
+            "refrigerant_compressor_eta_is_target": ref["eta_is_target"],
+            "refrigerant_compressor_eta_is_effective": ref["eta_is_effective"],
             "cop_system": cop,
             "cop_room_only": cop_room_only,
             "base_room_load_w": self._base_room_load_w(time_s),

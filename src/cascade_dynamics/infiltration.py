@@ -160,11 +160,8 @@ def tian_geometry(cfg: dict[str, Any], opening_fraction: float) -> dict[str, flo
     }
 
 
-def _smooth_stage_fraction(cumulative_volume_m3: float, v_eff_m3: float, smoothing_m3: float) -> float:
-    if smoothing_m3 <= 0.0:
-        return 1.0 if cumulative_volume_m3 >= v_eff_m3 else 0.0
-    exponent = -float(np.clip((cumulative_volume_m3 - v_eff_m3) / smoothing_m3, -60.0, 60.0))
-    return 1.0 / (1.0 + math.exp(exponent))
+def _stage_fraction(cumulative_volume_m3: float, v_eff_m3: float) -> float:
+    return 1.0 if cumulative_volume_m3 >= v_eff_m3 else 0.0
 
 
 def _state_derivative(
@@ -177,11 +174,10 @@ def _state_derivative(
     lambda_f = float(cfg.get("lambda_f", 0.025))
     xi_sum = float(cfg.get("xi_sum", 4.0))
     effectiveness = float(np.clip(cfg.get("effectiveness", cfg.get("E", 0.0)), 0.0, 1.0))
-    smoothing = float(cfg.get("stage_smoothing_m3", 0.0))
 
     v = max(float(state.velocity_m_s), 0.0)
     rho = max(float(state.density_kg_m3), 1.0e-9)
-    stage2 = _smooth_stage_fraction(state.cumulative_volume_m3, geom["V_eff"], smoothing)
+    stage2 = _stage_fraction(state.cumulative_volume_m3, geom["V_eff"])
     rho_exit = (1.0 - stage2) * rho_i + stage2 * rho
 
     delta_p_g = (geom["H_d"] / 4.0) * G * (rho - rho_o)
