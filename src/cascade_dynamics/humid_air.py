@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable
 
 
@@ -33,6 +34,7 @@ class HumidAirState:
     saturation_humidity_ratio: float
 
 
+@lru_cache(maxsize=32768)
 def saturation_pressure_water_pa(temperature_k: float) -> float:
     """ASHRAE saturation pressure over ice below 0 C and water above 0 C."""
     t = max(float(temperature_k), 173.15)
@@ -104,6 +106,7 @@ def _dry_air_entropy(temperature_k: float, dry_air_pressure_pa: float) -> float:
     return CP_DRY_AIR * math.log(temperature_k / T_REF_K) - R_DRY_AIR * math.log(p_da / P_REF_PA)
 
 
+@lru_cache(maxsize=131072)
 def humid_air_state(temperature_k: float, pressure_pa: float, humidity_ratio: float) -> HumidAirState:
     t = float(temperature_k)
     p = float(pressure_pa)
@@ -176,6 +179,7 @@ def solve_temperature_for_property(
     return humid_air_state(0.5 * (lo + hi), pressure_pa, humidity_ratio)
 
 
+@lru_cache(maxsize=65536)
 def state_at_entropy(pressure_pa: float, humidity_ratio: float, entropy_j_kg_da_k: float) -> HumidAirState:
     return solve_temperature_for_property(
         pressure_pa,
@@ -185,6 +189,7 @@ def state_at_entropy(pressure_pa: float, humidity_ratio: float, entropy_j_kg_da_
     )
 
 
+@lru_cache(maxsize=65536)
 def state_at_enthalpy(pressure_pa: float, humidity_ratio: float, enthalpy_j_kg_da: float) -> HumidAirState:
     return solve_temperature_for_property(
         pressure_pa,

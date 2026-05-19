@@ -112,13 +112,22 @@ BITZER map:
 map = f(tevap, tcond, speed_rpm)
 mdot_ref = map.mdot_kg_s
 Wcomp_ref = map.P_W
+Pcond = pressure that gives mdot_ref * (h8s(Pcond, s7) - h7) / eta_is = Wcomp_ref
+Qcascade + Qdock = map.Q_W when capacity_balance_model = "map_capacity_direct"
 Qcond = Qevap_total + Wcomp_ref
 ```
 
-The solver treats `tcond_c` as an algebraic variable, gets condensing pressure
-from `Psat(tcond)`, and matches both the compressor-map mass flow and the
-expansion-valve flow relation against the refrigerant mass flow. The NH3
-capacity controller acts on `vcc_cycle.compressor.speed_rpm`.
+With `pressure_lift_model: "map_power_backcalculate"`, the solver still treats
+`tcond_c` as the condenser heat-balance temperature, but the refrigerant
+high-side pressure comes from the compressor power back-calculation rather than
+directly from `Psat(tcond)`. The expansion valve uses that compressor-derived
+high-side pressure, and the NH3 capacity controller acts on
+`vcc_cycle.compressor.speed_rpm`.
+
+With `capacity_balance_model: "map_capacity_direct"`, the cascade/dock
+evaporator load is constrained directly by the compressor map cooling capacity:
+`q_cascade + q_dock = map.Q_W`. This replaces the cascade-UA residual for the
+active solve; the mode can be disabled by removing or changing that config key.
 
 ## Run
 
@@ -127,6 +136,31 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case.json
 ```
 
 The script prints a short summary and writes plots into `outputs/`.
+
+Run one modified door-duration case:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case.json --door-open-duration 30
+```
+
+Run the 30 s, 60 s, and 120 s door-opening cases in parallel:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case.json --door-open-durations 30 60 120 --parallel --workers 3
+```
+
+Append a stable output version tag:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case.json --door-open-durations 30 60 120 --parallel --workers 3 --run-version 2
+```
+
+Door-duration cases keep the base config in memory, set
+`disturbances.infiltration.t_close_s = t_open_s + duration`, and write separate
+outputs such as `outputs/paper_reference_case_door_30s.csv`. With
+`--run-version 2`, the same case writes
+`outputs/paper_reference_case_door_30s_2.csv`; rerunning version `2` overwrites
+that version's files.
 
 Before the transient run starts, `simulation.startup_initialization` can run a
 separate startup design-point solve. This mode does not advance time. It writes

@@ -18,6 +18,67 @@ from .infiltration import TianInfiltrationState, advance_tian_infiltration, air_
 
 
 KELVIN_OFFSET = 273.15
+MAP_POWER_PRESSURE_LIFT_MODES = {
+    "map_power_backcalculate",
+    "map_power_lift",
+    "power_backcalculate",
+}
+MAP_COOLING_CAPACITY_BALANCE_MODES = {
+    "map_cooling_capacity",
+    "map_capacity",
+    "map_capacity_direct",
+}
+
+
+def compressor_uses_map_power_pressure_lift(compressor_cfg: dict) -> bool:
+    return str(compressor_cfg.get("pressure_lift_model", "")).lower() in MAP_POWER_PRESSURE_LIFT_MODES
+
+
+def compressor_uses_map_cooling_capacity_balance(compressor_cfg: dict) -> bool:
+    return str(compressor_cfg.get("capacity_balance_model", "")).lower() in MAP_COOLING_CAPACITY_BALANCE_MODES
+
+
+def compressor_discharge_pressure_from_power(
+    p_suction_pa: float,
+    h_suction_j_kg: float,
+    s_suction_j_kg_k: float,
+    mass_flow_kg_s: float,
+    power_w: float,
+    eta_is: float,
+    fluid: str,
+    pressure_ratio_min: float = 1.000001,
+    pressure_ratio_max: float | None = None,
+) -> float:
+    target_h_is = h_suction_j_kg + max(float(power_w), 0.0) * max(float(eta_is), 1.0e-6) / max(float(mass_flow_kg_s), 1.0e-9)
+    lo = max(float(p_suction_pa) * max(float(pressure_ratio_min), 1.000001), float(p_suction_pa) * 1.000001)
+    if pressure_ratio_max is None:
+        hi = 0.999 * float(PropsSI("Pcrit", fluid))
+    else:
+        hi = float(p_suction_pa) * max(float(pressure_ratio_max), float(pressure_ratio_min) * 1.001)
+    hi = max(hi, lo * 1.001)
+
+    def residual(pressure_pa: float) -> float:
+        h_is = float(PropsSI("H", "P", pressure_pa, "S", s_suction_j_kg_k, fluid))
+        return h_is - target_h_is
+
+    f_lo = residual(lo)
+    if f_lo >= 0.0:
+        return lo
+
+    f_hi = residual(hi)
+    if f_hi <= 0.0:
+        return hi
+
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        f_mid = residual(mid)
+        if abs(f_mid) <= 1.0e-4 or abs(hi - lo) <= 1.0e-3:
+            return mid
+        if f_mid >= 0.0:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
 
 
 @dataclass
@@ -224,6 +285,10 @@ class CascadeSystemModel:
         q_cascade_ua = vcc_cfg["cascade_ua_w_k"] * cascade_lmtd
         q_cond_ua = vcc_cfg["condenser_ua_w_k"] * condenser_lmtd
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
+        if ref["uses_map_cooling_capacity_balance"]:
+            cascade_balance = ref["q_evap_load_requested"] - ref["compressor_map_q_w"]
+        else:
+            cascade_balance = air["q_cascade"] - q_cascade_ua
 
         balances = np.array(
             [
@@ -232,7 +297,7 @@ class CascadeSystemModel:
                 ref["q_cond"] - sink_rejection,
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
-                air["q_cascade"] - q_cascade_ua,
+                cascade_balance,
                 ref["q_cond"] - q_cond_ua,
                 m_ref - ref["m_ref_valve"],
                 m_ref - ref["m_ref_compressor"],
@@ -255,6 +320,11 @@ class CascadeSystemModel:
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
             "air_pressure_ratio": air["pressure_ratio"],
+            "refrigerant_evaporating_pressure_pa": ref["p_evap"],
+            "refrigerant_condensing_pressure_pa": ref["p_cond"],
+            "refrigerant_pressure_ratio": ref["pressure_ratio"],
+            "refrigerant_condensing_pressure_from_tcond_pa": ref["p_cond_from_tcond"],
+            "refrigerant_pressure_ratio_from_tcond": ref["pressure_ratio_from_tcond"],
             "air_compressor_map_mass_flow_kg_s": air["m_air_map"],
             "infiltration_room_w": infiltration["room_w"],
             "infiltration_dock_w": infiltration["dock_w"],
@@ -263,6 +333,9 @@ class CascadeSystemModel:
             "humidity_ratio_supply_ice_kg_kg_da": air["humidity_ratio_5_ice"],
             "ice_mass_flow_kg_s": air["ice_mass_flow"],
             "q_dock_w": q_dock_evap,
+            "q_evap_total_w": ref["q_evap_total"],
+            "q_evap_load_requested_w": ref["q_evap_load_requested"],
+            "q_map_capacity_balance_error_w": ref["q_map_capacity_balance_error"],
             "refrigerant_superheat_k": ref["superheat_k"],
             "refrigerant_compressor_work_w": ref["w_ref_comp"],
             "refrigerant_compressor_isentropic_work_w": ref["w_ref_isentropic"],
@@ -401,22 +474,19 @@ class CascadeSystemModel:
     def _evaluate_refrigerant_cycle(self, tevap_k: float, tcond_k: float, m_ref: float, q_cascade: float, q_dock: float) -> dict[str, float]:
         vcc_cfg = self.cfg["vcc_cycle"]
         p_evap = p_sat(tevap_k, self.ref_fluid)
-        p_cond = p_sat(tcond_k, self.ref_fluid)
+        p_cond_from_tcond = p_sat(tcond_k, self.ref_fluid)
+        p_cond = p_cond_from_tcond
         t9_k = tcond_k - vcc_cfg["subcooling_k"]
-        h9 = h_refrigerant_liquid(t9_k, p_cond, self.ref_fluid, vcc_cfg["subcooling_k"])
+        h9 = h_refrigerant_liquid(t9_k, p_cond_from_tcond, self.ref_fluid, vcc_cfg["subcooling_k"])
         h10 = h9
-        evap_total = q_cascade + q_dock
-        h7 = h10 + evap_total / max(m_ref, 1.0e-6)
-        t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
-        s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
-        superheat_k = t7_k - tevap_k
         compressor_cfg = vcc_cfg["compressor"]
         compressor_eta_is = float(compressor_cfg.get("eta_is", 1.0))
-        h8s = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
-        w_ref_isentropic = m_ref * (h8s - h7)
         compressor_speed_rpm = float(compressor_cfg.get("speed_rpm", 0.0))
+        q_evap_load_requested = q_cascade + q_dock
         compressor_map_q_w = 0.0
         m_ref_compressor = m_ref
+        w_ref_comp = 0.0
+        uses_map_capacity_balance = False
         if compressor_cfg.get("model", "simple_isentropic") == "bitzer_variable_speed_map":
             compressor_map = ammonia_compressor_map(
                 tcond_k,
@@ -427,8 +497,30 @@ class CascadeSystemModel:
             compressor_map_q_w = compressor_map["Q_W"]
             w_ref_comp = compressor_map["P_W"]
             m_ref_compressor = compressor_map["mdot_kg_s"]
+            uses_map_capacity_balance = compressor_uses_map_cooling_capacity_balance(compressor_cfg)
+        evap_total = compressor_map_q_w if uses_map_capacity_balance else q_evap_load_requested
+        h7 = h10 + evap_total / max(m_ref, 1.0e-6)
+        t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
+        s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
+        superheat_k = t7_k - tevap_k
+        if compressor_cfg.get("model", "simple_isentropic") == "bitzer_variable_speed_map":
+            if compressor_uses_map_power_pressure_lift(compressor_cfg):
+                p_cond = compressor_discharge_pressure_from_power(
+                    p_evap,
+                    h7,
+                    s7,
+                    m_ref_compressor,
+                    w_ref_comp,
+                    compressor_eta_is,
+                    self.ref_fluid,
+                    pressure_ratio_min=float(compressor_cfg.get("pressure_ratio_min", 1.000001)),
+                    pressure_ratio_max=compressor_cfg.get("pressure_ratio_max"),
+                )
         else:
-            w_ref_comp = float(compressor_cfg.get("work_w", w_ref_isentropic / max(compressor_eta_is, 1.0e-6)))
+            h8s_for_work = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
+            w_ref_comp = float(compressor_cfg.get("work_w", m_ref * (h8s_for_work - h7) / max(compressor_eta_is, 1.0e-6)))
+        h8s = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
+        w_ref_isentropic = m_ref * (h8s - h7)
         h8 = h7 + w_ref_comp / max(m_ref, 1.0e-6)
         t8_k = float(PropsSI("T", "P", p_cond, "H", h8, self.ref_fluid))
         q_cond = evap_total + w_ref_comp
@@ -442,8 +534,14 @@ class CascadeSystemModel:
             "h7": h7,
             "t7_k": t7_k,
             "t8_k": t8_k,
+            "pressure_ratio": p_cond / max(p_evap, 1.0e-9),
+            "p_cond_from_tcond": p_cond_from_tcond,
+            "pressure_ratio_from_tcond": p_cond_from_tcond / max(p_evap, 1.0e-9),
             "superheat_k": superheat_k,
             "q_evap_total": evap_total,
+            "q_evap_load_requested": q_evap_load_requested,
+            "q_map_capacity_balance_error": q_evap_load_requested - compressor_map_q_w,
+            "uses_map_cooling_capacity_balance": uses_map_capacity_balance,
             "q_cond": q_cond,
             "w_ref_comp": w_ref_comp,
             "w_ref_isentropic": w_ref_isentropic,
@@ -498,6 +596,10 @@ class CascadeSystemModel:
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
         room_load_w = self.load_w(time_s)
         dock_load_w = self.dock_load_w(time_s)
+        if ref["uses_map_cooling_capacity_balance"]:
+            cascade_balance = ref["q_evap_load_requested"] - ref["compressor_map_q_w"]
+        else:
+            cascade_balance = air["q_cascade"] - q_cascade_ua
 
         res = np.array(
             [
@@ -506,7 +608,7 @@ class CascadeSystemModel:
                 sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
-                air["q_cascade"] - q_cascade_ua,
+                cascade_balance,
                 ref["q_cond"] - q_cond_ua,
                 m_ref - ref["m_ref_valve"],
                 m_ref - ref["m_ref_compressor"],
@@ -567,6 +669,9 @@ class CascadeSystemModel:
             "q_dock_w": q_dock,
             "q_useful_w": useful_cooling,
             "q_cascade_w": air["q_cascade"],
+            "q_evap_total_w": ref["q_evap_total"],
+            "q_evap_load_requested_w": ref["q_evap_load_requested"],
+            "q_map_capacity_balance_error_w": ref["q_map_capacity_balance_error"],
             "q_cond_w": ref["q_cond"],
             "w_air_comp_w": air["w_air_comp"],
             "w_air_turb_w": air["w_air_turb"],
@@ -575,6 +680,11 @@ class CascadeSystemModel:
             "w_ref_isentropic_w": ref["w_ref_isentropic"],
             "refrigerant_compressor_speed_rpm": ref["compressor_speed_rpm"],
             "refrigerant_compressor_map_capacity_w": ref["compressor_map_q_w"],
+            "refrigerant_evaporating_pressure_pa": ref["p_evap"],
+            "refrigerant_condensing_pressure_pa": ref["p_cond"],
+            "refrigerant_pressure_ratio": ref["pressure_ratio"],
+            "refrigerant_condensing_pressure_from_tcond_pa": ref["p_cond_from_tcond"],
+            "refrigerant_pressure_ratio_from_tcond": ref["pressure_ratio_from_tcond"],
             "refrigerant_compressor_eta_is_effective": ref["eta_is_effective"],
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],

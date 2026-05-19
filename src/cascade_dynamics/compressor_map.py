@@ -159,6 +159,47 @@ def volumetric_flow_from_head(config: dict[str, Any], head_m: float) -> float:
     return volumetric_flow_m3_s
 
 
+def _speed_map_head_from_volumetric_flow(config: dict[str, Any], target_q_m3_s: float) -> float | None:
+    head_min_m = float(config["head_min_m"])
+    head_max_m = float(config["head_max_m"])
+    q_min_m3_s = float(config.get("q_min_m3_s", 0.0))
+    q_max_m3_s = float(config.get("q_max_m3_s", 1.0e9))
+    target_q = min(max(float(target_q_m3_s), q_min_m3_s), q_max_m3_s)
+
+    rpm = float(config["speed_rpm"])
+    design_speed_rpm = float(config.get("design_speed_rpm", 15000.0))
+    speed_scale_rpm = float(config.get("speed_scale_rpm", 5000.0))
+    u = (rpm - design_speed_rpm) / speed_scale_rpm
+
+    coeffs_ascending = np.array(
+        [
+            AIR_SPEED_MAP_COEFFS[i, 0]
+            + AIR_SPEED_MAP_COEFFS[i, 1] * u
+            + AIR_SPEED_MAP_COEFFS[i, 2] * u**2
+            for i in range(AIR_SPEED_MAP_COEFFS.shape[0])
+        ],
+        dtype=float,
+    )
+    coeffs_ascending[0] -= target_q
+    roots = np.roots(coeffs_ascending[::-1])
+
+    h_min = head_min_m / 1000.0
+    h_max = head_max_m / 1000.0
+    candidates = [
+        float(root.real)
+        for root in roots
+        if abs(root.imag) <= 1.0e-7 and h_min - 1.0e-9 <= root.real <= h_max + 1.0e-9
+    ]
+    if not candidates:
+        return None
+
+    def flow_error(h: float) -> float:
+        return abs(volumetric_flow_from_head(config, 1000.0 * h) - target_q)
+
+    h_solution = min(candidates, key=flow_error)
+    return float(np.clip(1000.0 * h_solution, head_min_m, head_max_m))
+
+
 def mass_flow_from_isentropic_head(
     config: dict[str, Any],
     head_j_kg: float,
@@ -186,28 +227,45 @@ def head_from_mass_flow(
     head_min_m = float(config["head_min_m"])
     head_max_m = float(config["head_max_m"])
     target_m_dot = float(target_m_dot_kg_s)
+    model = config.get("model", "polynomial_volumetric_flow_head")
+
+    if model in {"polynomial_volumetric_flow_head_speed", "polynomial_volumetric_flow_head_speed_constant_mass_flow"}:
+        target_q_m3_s = target_m_dot / suction_density_kg_m3
+        head = _speed_map_head_from_volumetric_flow(config, target_q_m3_s)
+        if head is not None:
+            return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
 
     def residual(head_m: float) -> float:
         return volumetric_flow_from_head(config, head_m) * suction_density_kg_m3 - target_m_dot
 
-    sample_heads = np.linspace(head_min_m, head_max_m, 200)
-    sample_residuals = np.array([residual(float(head_m)) for head_m in sample_heads], dtype=float)
-    best_idx = int(np.argmin(np.abs(sample_residuals)))
-
     bracket: tuple[float, float] | None = None
-    for idx in range(len(sample_heads) - 1):
-        f_lo = sample_residuals[idx]
-        f_hi = sample_residuals[idx + 1]
-        if f_lo == 0.0:
-            head = float(sample_heads[idx])
-            return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
-        if f_lo * f_hi <= 0.0:
-            bracket = (float(sample_heads[idx]), float(sample_heads[idx + 1]))
-            break
+    f_min = residual(head_min_m)
+    f_max = residual(head_max_m)
+    if f_min == 0.0:
+        return head_min_m, volumetric_flow_from_head(config, head_min_m) * suction_density_kg_m3
+    if f_max == 0.0:
+        return head_max_m, volumetric_flow_from_head(config, head_max_m) * suction_density_kg_m3
+    if f_min * f_max <= 0.0:
+        bracket = (head_min_m, head_max_m)
 
     if bracket is None:
-        head = float(sample_heads[best_idx])
-        return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
+        sample_heads = np.linspace(head_min_m, head_max_m, 200)
+        sample_residuals = np.array([residual(float(head_m)) for head_m in sample_heads], dtype=float)
+        best_idx = int(np.argmin(np.abs(sample_residuals)))
+
+        for idx in range(len(sample_heads) - 1):
+            f_lo = sample_residuals[idx]
+            f_hi = sample_residuals[idx + 1]
+            if f_lo == 0.0:
+                head = float(sample_heads[idx])
+                return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
+            if f_lo * f_hi <= 0.0:
+                bracket = (float(sample_heads[idx]), float(sample_heads[idx + 1]))
+                break
+
+        if bracket is None:
+            head = float(sample_heads[best_idx])
+            return head, volumetric_flow_from_head(config, head) * suction_density_kg_m3
 
     lo, hi = bracket
     f_lo = residual(lo)

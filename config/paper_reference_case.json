@@ -1,11 +1,12 @@
 {
   "simulation": {
     "t_start_s": 0.0,
-    "t_end_s": 600.0,
-    "dt_s": 0.2,
+    "t_end_s": 1200.0,
+    "dt_s": 1.0,
     "newton_tol": 1e-5,
     "newton_max_iter": 100,
     "fd_step": 1e-5,
+    "jacobian_scheme": "forward",
     "startup_initialization": {
       "enabled": true,
       "mode": "paper_design_point",
@@ -22,6 +23,7 @@
       "cascade_air_evap_min_delta_t_c": 10.0,
       "regenerator_effectiveness": 0.9,
       "target_vcc_cooling_capacity_w": 103000.0,
+      "fixed_vcc_compressor_speed_rpm": 1533.0,
       "superheat_target_k": 5.0,
       "free_state_variables": [
         "room_c",
@@ -112,6 +114,9 @@
     "compressor": {
       "model": "bitzer_variable_speed_map",
       "eta_is": 0.85,
+      "pressure_lift_model": "map_power_backcalculate",
+      "pressure_ratio_min": 1.000001,
+      "pressure_ratio_max": 20.0,
       "speed_rpm": 1533.0,
       "speed_min_rpm": 1226.0,
       "speed_max_rpm": 1610.0,

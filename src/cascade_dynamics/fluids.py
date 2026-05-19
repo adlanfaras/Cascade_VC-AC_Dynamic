@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 from CoolProp.CoolProp import PropsSI
 
 
+@lru_cache(maxsize=65536)
 def h_tp(temperature_k: float, pressure_pa: float, fluid: str) -> float:
     return float(PropsSI("H", "T", temperature_k, "P", pressure_pa, fluid))
 
 
+@lru_cache(maxsize=65536)
 def p_sat(temperature_k: float, fluid: str) -> float:
     return float(PropsSI("P", "T", temperature_k, "Q", 0.0, fluid))
 
 
+@lru_cache(maxsize=65536)
 def h_sat_liq(temperature_k: float, fluid: str) -> float:
     return float(PropsSI("H", "T", temperature_k, "Q", 0.0, fluid))
 
