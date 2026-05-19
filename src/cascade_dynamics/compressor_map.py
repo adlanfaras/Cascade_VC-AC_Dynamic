@@ -126,7 +126,11 @@ def volumetric_flow_from_head(config: dict[str, Any], head_m: float) -> float:
     head_max_m = float(config.get("head_max_m", head_m))
     head_eval_m = min(max(head_m, head_min_m), head_max_m)
 
-    if model in {"polynomial_volumetric_flow_head_speed", "polynomial_volumetric_flow_head_speed_constant_mass_flow"}:
+    if model in {
+        "polynomial_volumetric_flow_head_speed",
+        "polynomial_volumetric_flow_head_speed_constant_mass_flow",
+        "polynomial_volumetric_flow_head_speed_damper",
+    }:
         h = head_eval_m / 1000.0
         rpm = float(config["speed_rpm"])
         design_speed_rpm = float(config.get("design_speed_rpm", 15000.0))
@@ -229,7 +233,11 @@ def head_from_mass_flow(
     target_m_dot = float(target_m_dot_kg_s)
     model = config.get("model", "polynomial_volumetric_flow_head")
 
-    if model in {"polynomial_volumetric_flow_head_speed", "polynomial_volumetric_flow_head_speed_constant_mass_flow"}:
+    if model in {
+        "polynomial_volumetric_flow_head_speed",
+        "polynomial_volumetric_flow_head_speed_constant_mass_flow",
+        "polynomial_volumetric_flow_head_speed_damper",
+    }:
         target_q_m3_s = target_m_dot / suction_density_kg_m3
         head = _speed_map_head_from_volumetric_flow(config, target_q_m3_s)
         if head is not None:

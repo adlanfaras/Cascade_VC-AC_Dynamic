@@ -40,7 +40,8 @@ Component models:
   evaporator heat removal
 - expansion valve: isenthalpic with linear pressure-drop flow equation
 - bottom-side air compressor: variable-speed head-to-volumetric-flow polynomial
-  with a perfect-damper option that holds dry-air mass flow constant
+  with a damper-resistance option that derives dry-air mass flow from the
+  compressor map and flow resistance
 - ammonia compressor: BITZER W6FA-K R717 variable-speed map for cooling
   capacity, shaft power, and refrigerant mass flow
 
@@ -65,18 +66,16 @@ the regenerator LMTD is based on:
 LMTD_reg = LMTD(T3 - T6, T4 - Troom)
 ```
 
-The reference case uses the perfect-damper air-flow mode. The humid-air
+The reference case uses the damper-resistance air-flow mode. The humid-air
 properties are expressed per kg of dry air, so `m_air` is the dry-air mass flow.
-In this mode `m_air` is held at `fixed_m_dot_kg_s`, compressor speed selects
-the map head that corresponds to that flow, and the pressure ratio is then
-derived from the isentropic head:
+In this mode the compressor map gives volumetric flow as a function of head and
+speed, while the damper/system resistance requires:
 
 ```text
-m_air = fixed_m_dot_kg_s
-Q_target = m_air / rho_dry_air,suction
-H = inverse_map(Q_target, rpm)
+H = H_static + K_damper * (Q / opening)^2
 h_is = H * g
 P2/P1 = pressure ratio that gives J(P2, s1, x_room) - J1 = h_is
+m_air = Q * rho_dry_air,suction
 ```
 
 So `air_cycle.pressure_ratio` is not constant in this mode; it is reported to
@@ -123,6 +122,10 @@ high-side pressure comes from the compressor power back-calculation rather than
 directly from `Psat(tcond)`. The expansion valve uses that compressor-derived
 high-side pressure, and the NH3 capacity controller acts on
 `vcc_cycle.compressor.speed_rpm`.
+
+During paper-design startup, `fit_eta_is_from_startup: true` first fits the
+compressor isentropic efficiency so the map power is consistent with
+`Psat(tcond)`. That fitted `eta_is` is then held in the transient model.
 
 With `capacity_balance_model: "map_capacity_direct"`, the cascade/dock
 evaporator load is constrained directly by the compressor map cooling capacity:
@@ -179,12 +182,13 @@ T1 = TRS + eR * (T3 - TRS)
 ```
 
 In this codebase, `room_c` corresponds to `TRS`, and `t6_c` corresponds to the
-compressor inlet `T1`. In the perfect-damper air mode, the initializer solves
-the air-compressor speed that gives the target humid-air turbine outlet
-temperature, then derives the matching pressure ratio from the compressor map.
-It also back-calculates the room load, heat-exchanger UAs, sink flow,
-refrigerant compressor speed, refrigerant mass flow, and expansion-valve opening
-so the coupled model starts from that paper-like state.
+compressor inlet `T1`. In damper-resistance air mode, the initializer solves the
+air head that gives the target humid-air turbine outlet temperature, derives the
+air mass flow from `Q_evap,target - Q_dock`, and back-calculates the damper
+resistance at the configured startup opening. It also back-calculates the room
+load, heat-exchanger UAs, sink flow, refrigerant compressor efficiency,
+refrigerant mass flow, and expansion-valve opening so the coupled model starts
+from that paper-like state.
 
 The startup problem is configured by:
 

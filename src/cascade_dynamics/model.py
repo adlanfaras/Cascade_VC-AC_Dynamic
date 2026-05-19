@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from CoolProp.CoolProp import PropsSI
 
-from .compressor_map import ammonia_compressor_map, head_from_mass_flow, mass_flow_from_isentropic_head
+from .compressor_map import ammonia_compressor_map, head_from_mass_flow, mass_flow_from_isentropic_head, volumetric_flow_from_head
 from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actual_enthalpy
 from .fluids import h_refrigerant_liquid, p_sat
 from .humid_air import (
@@ -79,6 +79,18 @@ def compressor_discharge_pressure_from_power(
         else:
             lo = mid
     return 0.5 * (lo + hi)
+
+
+def compressor_eta_is_from_map_power(
+    p_discharge_pa: float,
+    h_suction_j_kg: float,
+    s_suction_j_kg_k: float,
+    mass_flow_kg_s: float,
+    power_w: float,
+    fluid: str,
+) -> float:
+    h_is = float(PropsSI("H", "P", p_discharge_pa, "S", s_suction_j_kg_k, fluid))
+    return max(float(mass_flow_kg_s), 1.0e-9) * max(h_is - h_suction_j_kg, 0.0) / max(float(power_w), 1.0e-9)
 
 
 @dataclass
@@ -320,6 +332,8 @@ class CascadeSystemModel:
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
             "air_pressure_ratio": air["pressure_ratio"],
+            "air_damper_opening": air["damper_opening"],
+            "air_damper_resistance_head_coefficient": air["damper_resistance_head_coefficient"],
             "refrigerant_evaporating_pressure_pa": ref["p_evap"],
             "refrigerant_condensing_pressure_pa": ref["p_cond"],
             "refrigerant_pressure_ratio": ref["pressure_ratio"],
@@ -402,7 +416,22 @@ class CascadeSystemModel:
         flow_cfg = air_cfg["compressor_mass_flow"]
         flow_model = flow_cfg.get("model", "polynomial_volumetric_flow_head")
         map_m_air = 0.0
-        if flow_model == "polynomial_volumetric_flow_head_speed_constant_mass_flow":
+        if flow_model == "polynomial_volumetric_flow_head_speed_damper":
+            head_m, volumetric_flow_m3_s = self._air_damper_operating_point(flow_cfg)
+            m_air = volumetric_flow_m3_s * rho1
+            map_m_air = m_air
+            compressor_head_is = head_m * 9.80665
+            p2 = self._pressure_from_isentropic_head(
+                p1,
+                x_room,
+                state1.entropy_j_kg_da_k,
+                h1,
+                compressor_head_is,
+            )
+            state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
+            h2s = state2s.enthalpy_j_kg_da
+            compressor_head_is = h2s - h1
+        elif flow_model == "polynomial_volumetric_flow_head_speed_constant_mass_flow":
             m_air = float(flow_cfg["fixed_m_dot_kg_s"])
             head_m, map_m_air = head_from_mass_flow(flow_cfg, m_air, rho1)
             compressor_head_is = head_m * 9.80665
@@ -456,6 +485,8 @@ class CascadeSystemModel:
             "t5_k": t5_k,
             "m_air": m_air,
             "m_air_map": map_m_air,
+            "damper_opening": float(flow_cfg.get("damper_opening", 1.0)),
+            "damper_resistance_head_coefficient": float(flow_cfg.get("damper_resistance_head_coefficient", 0.0)),
             "rho1": rho1,
             "rho1_mixture": state1.mixture_density_kg_m3,
             "humidity_ratio_room": x_room,
@@ -470,6 +501,60 @@ class CascadeSystemModel:
             "w_air_comp": w_air_comp,
             "w_air_turb": m_air * (h4 - h5),
         }
+
+    def _air_damper_operating_point(self, flow_cfg: dict) -> tuple[float, float]:
+        head_min_m = float(flow_cfg["head_min_m"])
+        head_max_m = float(flow_cfg["head_max_m"])
+        opening = float(flow_cfg.get("damper_opening", 0.5))
+        opening_min = float(flow_cfg.get("damper_opening_min", 0.05))
+        opening_max = float(flow_cfg.get("damper_opening_max", 1.0))
+        opening = min(max(opening, opening_min), opening_max)
+        resistance = float(flow_cfg.get("damper_resistance_head_coefficient", 0.0))
+        static_head_m = float(flow_cfg.get("system_static_head_m", 0.0))
+
+        if resistance <= 0.0:
+            head = min(max(float(flow_cfg.get("operating_head_m", head_min_m)), head_min_m), head_max_m)
+            return head, volumetric_flow_from_head(flow_cfg, head)
+
+        def residual(head_m: float) -> float:
+            q_m3_s = volumetric_flow_from_head(flow_cfg, head_m)
+            required_head_m = static_head_m + resistance * (q_m3_s / max(opening, 1.0e-9)) ** 2
+            return head_m - required_head_m
+
+        sample_heads = np.linspace(head_min_m, head_max_m, 200)
+        sample_residuals = np.array([residual(float(head_m)) for head_m in sample_heads], dtype=float)
+        best_idx = int(np.argmin(np.abs(sample_residuals)))
+
+        bracket: tuple[float, float] | None = None
+        for idx in range(len(sample_heads) - 1):
+            f_lo = sample_residuals[idx]
+            f_hi = sample_residuals[idx + 1]
+            if f_lo == 0.0:
+                head = float(sample_heads[idx])
+                return head, volumetric_flow_from_head(flow_cfg, head)
+            if f_lo * f_hi <= 0.0:
+                bracket = (float(sample_heads[idx]), float(sample_heads[idx + 1]))
+                break
+
+        if bracket is None:
+            head = float(sample_heads[best_idx])
+            return head, volumetric_flow_from_head(flow_cfg, head)
+
+        lo, hi = bracket
+        f_lo = residual(lo)
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            f_mid = residual(mid)
+            if abs(f_mid) <= 1.0e-9 or abs(hi - lo) <= 1.0e-7:
+                return mid, volumetric_flow_from_head(flow_cfg, mid)
+            if f_lo * f_mid <= 0.0:
+                hi = mid
+            else:
+                lo = mid
+                f_lo = f_mid
+
+        head = 0.5 * (lo + hi)
+        return head, volumetric_flow_from_head(flow_cfg, head)
 
     def _evaluate_refrigerant_cycle(self, tevap_k: float, tcond_k: float, m_ref: float, q_cascade: float, q_dock: float) -> dict[str, float]:
         vcc_cfg = self.cfg["vcc_cycle"]
@@ -689,6 +774,8 @@ class CascadeSystemModel:
             "m_ref_kg_s": m_ref,
             "m_air_kg_s": air["m_air"],
             "air_pressure_ratio": air["pressure_ratio"],
+            "air_damper_opening": air["damper_opening"],
+            "air_damper_resistance_head_coefficient": air["damper_resistance_head_coefficient"],
             "air_compressor_map_mass_flow_kg_s": air["m_air_map"],
             "air_compressor_suction_density_kg_m3": air["rho1"],
             "air_compressor_suction_mixture_density_kg_m3": air["rho1_mixture"],

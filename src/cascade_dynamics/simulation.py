@@ -15,19 +15,21 @@ from scipy.optimize import least_squares
 
 from .control import get_path, set_path
 from .control import ControlSystem
-from .compressor_map import ammonia_compressor_map
-from .components import positive_lmtd
+from .compressor_map import ammonia_compressor_map, volumetric_flow_from_head
+from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actual_enthalpy
 from .fluids import h_refrigerant_liquid, p_sat
+from .humid_air import humid_air_state, saturated_room_humidity_ratio, state_at_enthalpy, state_at_entropy
 from .model import (
     CascadeSystemModel,
     compressor_discharge_pressure_from_power,
+    compressor_eta_is_from_map_power,
     compressor_uses_map_power_pressure_lift,
 )
 from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 12
+STARTUP_CACHE_VERSION = 13
 
 STATE_INDEX = {
     "room_c": 0,
@@ -54,10 +56,14 @@ DEFAULT_STARTUP_FREE_STATE_VARIABLES = ["t3_c", "t4_c", "t6_c", "m_ref_kg_s"]
 PAPER_DESIGN_SOLVED_PATHS = [
     "air_cycle.pressure_ratio",
     "air_cycle.compressor_mass_flow.speed_rpm",
+    "air_cycle.compressor_mass_flow.damper_opening",
+    "air_cycle.compressor_mass_flow.damper_resistance_head_coefficient",
+    "air_cycle.compressor_mass_flow.system_static_head_m",
     "air_cycle.regenerator_ua_w_k",
     "vcc_cycle.cascade_ua_w_k",
     "vcc_cycle.condenser_ua_w_k",
     "vcc_cycle.compressor.speed_rpm",
+    "vcc_cycle.compressor.eta_is",
     "vcc_cycle.expansion_valve.opening",
     "boundary_conditions.load_before_w",
     "boundary_conditions.load_after_w",
@@ -77,6 +83,14 @@ class StartupInitializationResult:
 
 def _log(message: str) -> None:
     print(message, flush=True)
+
+
+def _path_exists(data: dict[str, Any], path: str) -> bool:
+    try:
+        get_path(data, path)
+    except KeyError:
+        return False
+    return True
 
 
 def _startup_signature_data(config: dict[str, Any]) -> dict[str, Any]:
@@ -206,9 +220,17 @@ def _air_compressor_speed_controls_mass_flow(config: dict[str, Any]) -> bool:
     return model == "polynomial_volumetric_flow_head_speed"
 
 
+def _air_compressor_uses_damper_resistance(config: dict[str, Any]) -> bool:
+    model = config["air_cycle"]["compressor_mass_flow"].get("model", "polynomial_volumetric_flow_head")
+    return model == "polynomial_volumetric_flow_head_speed_damper"
+
+
 def _air_pressure_ratio_is_derived(config: dict[str, Any]) -> bool:
     model = config["air_cycle"]["compressor_mass_flow"].get("model", "polynomial_volumetric_flow_head")
-    return model == "polynomial_volumetric_flow_head_speed_constant_mass_flow"
+    return model in {
+        "polynomial_volumetric_flow_head_speed_constant_mass_flow",
+        "polynomial_volumetric_flow_head_speed_damper",
+    }
 
 
 def _set_and_mirror_room_load(config: dict[str, Any], value_w: float) -> None:
@@ -403,6 +425,238 @@ def _solve_air_speed_for_evaporator_capacity(
     return int(result.nfev)
 
 
+def _air_metrics_for_head(
+    config: dict[str, Any],
+    model: CascadeSystemModel,
+    room_c: float,
+    t3_c: float,
+    t4_c: float,
+    t6_c: float,
+    head_m: float,
+) -> dict[str, float]:
+    air_cfg = config["air_cycle"]
+    p1 = float(air_cfg["p_low_pa"])
+    room_k = room_c + KELVIN_OFFSET
+    t3_k = t3_c + KELVIN_OFFSET
+    t4_k = t4_c + KELVIN_OFFSET
+    t6_k = t6_c + KELVIN_OFFSET
+    humidity_cfg = air_cfg.get("humid_air", {})
+    x_room = humidity_cfg.get("humidity_ratio")
+    if x_room is None:
+        relative_humidity = float(humidity_cfg.get("room_relative_humidity", 1.0))
+        x_room = saturated_room_humidity_ratio(room_k, p1, relative_humidity)
+    x_room = float(x_room)
+
+    state1 = humid_air_state(t6_k, p1, x_room)
+    compressor_head_is = float(head_m) * 9.80665
+    p2 = model._pressure_from_isentropic_head(
+        p1,
+        x_room,
+        state1.entropy_j_kg_da_k,
+        state1.enthalpy_j_kg_da,
+        compressor_head_is,
+    )
+    state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
+    h2 = compressor_actual_enthalpy(state1.enthalpy_j_kg_da, state2s.enthalpy_j_kg_da, air_cfg["compressor_eta_is"])
+    state2 = state_at_enthalpy(p2, x_room, h2)
+    state3 = humid_air_state(t3_k, p2, x_room)
+    state4 = humid_air_state(t4_k, p2, x_room)
+    state5s = state_at_entropy(p1, x_room, state4.entropy_j_kg_da_k)
+    h5 = turbine_actual_enthalpy(state4.enthalpy_j_kg_da, state5s.enthalpy_j_kg_da, air_cfg["turbine_eta_is"])
+    state5 = state_at_enthalpy(p1, x_room, h5)
+    return {
+        "pressure_ratio": p2 / p1,
+        "t2_c": state2.temperature_k - KELVIN_OFFSET,
+        "t5_c": state5.temperature_k - KELVIN_OFFSET,
+        "h2_minus_h3": h2 - state3.enthalpy_j_kg_da,
+        "rho1": state1.dry_air_density_kg_m3,
+    }
+
+
+def _solve_air_head_for_t5(
+    config: dict[str, Any],
+    model: CascadeSystemModel,
+    startup_cfg: dict[str, Any],
+    unknowns: np.ndarray,
+    t5_target_c: float,
+) -> tuple[float, dict[str, float], int]:
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _ = unknowns
+    flow_cfg = config["air_cycle"]["compressor_mass_flow"]
+    lower = float(flow_cfg["head_min_m"])
+    upper = float(flow_cfg["head_max_m"])
+
+    def residual_c(head_m: float) -> float:
+        metrics = _air_metrics_for_head(config, model, room_c, t3_c, t4_c, t6_c, float(head_m))
+        return metrics["t5_c"] - t5_target_c
+
+    sample_heads = np.linspace(lower, upper, int(startup_cfg.get("air_head_scan_points", 400)))
+    sample_residuals = np.array([residual_c(float(head)) for head in sample_heads], dtype=float)
+    best_idx = int(np.argmin(np.abs(sample_residuals)))
+    bracket: tuple[float, float] | None = None
+    iterations = len(sample_heads)
+
+    for idx in range(len(sample_heads) - 1):
+        f_lo = float(sample_residuals[idx])
+        f_hi = float(sample_residuals[idx + 1])
+        if abs(f_lo) <= float(startup_cfg.get("temperature_target_tolerance_c", 1.0e-3)):
+            head_m = float(sample_heads[idx])
+            metrics = _air_metrics_for_head(config, model, room_c, t3_c, t4_c, t6_c, head_m)
+            return head_m, metrics, iterations
+        if f_lo * f_hi <= 0.0:
+            bracket = (float(sample_heads[idx]), float(sample_heads[idx + 1]))
+            break
+
+    if bracket is None:
+        head_m = float(sample_heads[best_idx])
+        metrics = _air_metrics_for_head(config, model, room_c, t3_c, t4_c, t6_c, head_m)
+        final_error_c = metrics["t5_c"] - t5_target_c
+        raise RuntimeError(
+            f"Could not bracket target t5 {t5_target_c:.3f} C over compressor head range "
+            f"{lower:.3f} to {upper:.3f} m; best residual is {final_error_c:.3f} C "
+            f"at {head_m:.3f} m compressor head."
+        )
+
+    lo, hi = bracket
+    f_lo = residual_c(lo)
+    tolerance_c = float(startup_cfg.get("temperature_target_tolerance_c", 1.0e-3))
+    for _ in range(int(startup_cfg.get("air_head_bisection_max_iter", 100))):
+        iterations += 1
+        mid = 0.5 * (lo + hi)
+        f_mid = residual_c(mid)
+        if abs(f_mid) <= tolerance_c or abs(hi - lo) <= 1.0e-7:
+            head_m = mid
+            metrics = _air_metrics_for_head(config, model, room_c, t3_c, t4_c, t6_c, head_m)
+            return head_m, metrics, iterations
+        if f_lo * f_mid <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+            f_lo = f_mid
+
+    head_m = 0.5 * (lo + hi)
+    metrics = _air_metrics_for_head(config, model, room_c, t3_c, t4_c, t6_c, head_m)
+    final_error_c = metrics["t5_c"] - t5_target_c
+    if abs(final_error_c) > tolerance_c:
+        raise RuntimeError(
+            f"Could not meet target t5 {t5_target_c:.3f} C after bisection; "
+            f"best residual is {final_error_c:.3f} C at {head_m:.3f} m compressor head."
+        )
+    return head_m, metrics, iterations
+
+
+def _solve_air_speed_for_head_and_flow(
+    config: dict[str, Any],
+    startup_cfg: dict[str, Any],
+    head_m: float,
+    target_volumetric_flow_m3_s: float,
+) -> int:
+    flow_cfg = config["air_cycle"]["compressor_mass_flow"]
+    lower, upper = _free_parameter_bounds(
+        startup_cfg,
+        "air_cycle.compressor_mass_flow.speed_rpm",
+        (float(flow_cfg.get("speed_rpm", 15000.0)), float(flow_cfg.get("speed_rpm", 15000.0))),
+    )
+
+    def residual_q(speed_rpm: float) -> float:
+        flow_cfg["speed_rpm"] = float(speed_rpm)
+        q_m3_s = volumetric_flow_from_head(flow_cfg, head_m)
+        return q_m3_s - target_volumetric_flow_m3_s
+
+    sample_speeds = np.linspace(lower, upper, int(startup_cfg.get("air_speed_scan_points", 400)))
+    sample_residuals = np.array([residual_q(float(speed)) for speed in sample_speeds], dtype=float)
+    best_idx = int(np.argmin(np.abs(sample_residuals)))
+    bracket: tuple[float, float] | None = None
+    iterations = len(sample_speeds)
+    tolerance_q = float(startup_cfg.get("air_flow_target_tolerance_m3_s", 1.0e-5))
+
+    for idx in range(len(sample_speeds) - 1):
+        f_lo = float(sample_residuals[idx])
+        f_hi = float(sample_residuals[idx + 1])
+        if abs(f_lo) <= tolerance_q:
+            flow_cfg["speed_rpm"] = float(sample_speeds[idx])
+            return iterations
+        if f_lo * f_hi <= 0.0:
+            bracket = (float(sample_speeds[idx]), float(sample_speeds[idx + 1]))
+            break
+
+    if bracket is None:
+        speed_rpm = float(sample_speeds[best_idx])
+        flow_cfg["speed_rpm"] = speed_rpm
+        final_residual = residual_q(speed_rpm)
+        raise RuntimeError(
+            f"Could not bracket target air volumetric flow {target_volumetric_flow_m3_s:.6f} m3/s "
+            f"over speed range {lower:.3f} to {upper:.3f} rpm; best residual is "
+            f"{final_residual:.6f} m3/s at {speed_rpm:.3f} rpm."
+        )
+
+    lo, hi = bracket
+    f_lo = residual_q(lo)
+    for _ in range(int(startup_cfg.get("air_speed_bisection_max_iter", 100))):
+        iterations += 1
+        mid = 0.5 * (lo + hi)
+        f_mid = residual_q(mid)
+        if abs(f_mid) <= tolerance_q or abs(hi - lo) <= 1.0e-7:
+            flow_cfg["speed_rpm"] = float(mid)
+            return iterations
+        if f_lo * f_mid <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+            f_lo = f_mid
+
+    speed_rpm = 0.5 * (lo + hi)
+    flow_cfg["speed_rpm"] = float(speed_rpm)
+    final_residual = residual_q(speed_rpm)
+    if abs(final_residual) > tolerance_q:
+        raise RuntimeError(
+            f"Could not meet target air volumetric flow {target_volumetric_flow_m3_s:.6f} m3/s; "
+            f"best residual is {final_residual:.6f} m3/s at {speed_rpm:.3f} rpm."
+        )
+    return iterations
+
+
+def _initialize_air_damper_for_evaporator_capacity(
+    config: dict[str, Any],
+    model: CascadeSystemModel,
+    startup_cfg: dict[str, Any],
+    unknowns: np.ndarray,
+    t5_target_c: float,
+    target_capacity_w: float,
+) -> int:
+    _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
+    flow_cfg = config["air_cycle"]["compressor_mass_flow"]
+    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)
+    target_q_cascade_w = float(target_capacity_w) - q_dock
+    if target_q_cascade_w <= 0.0:
+        raise RuntimeError(
+            f"Target evaporator capacity {target_capacity_w:.3f} W is not above dock load {q_dock:.3f} W."
+        )
+
+    head_m, metrics, iterations = _solve_air_head_for_t5(config, model, startup_cfg, unknowns, t5_target_c)
+    target_m_air_kg_s = target_q_cascade_w / max(metrics["h2_minus_h3"], 1.0e-9)
+    target_q_m3_s = target_m_air_kg_s / max(metrics["rho1"], 1.0e-9)
+    iterations += _solve_air_speed_for_head_and_flow(config, startup_cfg, head_m, target_q_m3_s)
+
+    opening = float(flow_cfg.get("startup_damper_opening", flow_cfg.get("damper_opening", 0.5)))
+    opening_min = float(flow_cfg.get("damper_opening_min", 0.05))
+    opening_max = float(flow_cfg.get("damper_opening_max", 1.0))
+    opening = min(max(opening, opening_min), opening_max)
+    static_pressure_drop_pa = float(
+        flow_cfg.get("startup_static_pressure_drop_pa", startup_cfg.get("air_damper_static_pressure_drop_pa", 250.0))
+    )
+    static_head_m = max(static_pressure_drop_pa, 0.0) / max(metrics["rho1"] * 9.80665, 1.0e-9)
+    static_head_m = min(static_head_m, 0.95 * head_m)
+    resistance = max(head_m - static_head_m, 1.0e-9) / max((target_q_m3_s / max(opening, 1.0e-9)) ** 2, 1.0e-12)
+
+    flow_cfg["damper_opening"] = opening
+    flow_cfg["system_static_head_m"] = float(static_head_m)
+    flow_cfg["damper_resistance_head_coefficient"] = float(resistance)
+    flow_cfg["operating_head_m"] = float(head_m)
+    flow_cfg["startup_target_m_dot_kg_s"] = float(target_m_air_kg_s)
+    flow_cfg["startup_target_q_cascade_w"] = float(target_q_cascade_w)
+    return iterations
+
+
 def _solve_vcc_speed_for_map_capacity(
     config: dict[str, Any],
     startup_cfg: dict[str, Any],
@@ -460,17 +714,27 @@ def _build_paper_design_unknowns(config: dict[str, Any], startup_cfg: dict[str, 
 
 def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSystemModel, startup_cfg: dict[str, Any], time_s: float) -> StartupInitializationResult:
     unknowns, t5_target_c = _build_paper_design_unknowns(config, startup_cfg)
-    if _air_pressure_ratio_is_derived(config):
+    target_capacity_w = startup_cfg.get("target_vcc_cooling_capacity_w")
+    target_m_air = startup_cfg.get("target_air_mass_flow_kg_s")
+    fixed_vcc_speed_rpm = startup_cfg.get("fixed_vcc_compressor_speed_rpm")
+    vcc_speed_solved = False
+    if _air_compressor_uses_damper_resistance(config) and target_capacity_w is not None:
+        iteration_count = _initialize_air_damper_for_evaporator_capacity(
+            config,
+            model,
+            startup_cfg,
+            unknowns,
+            t5_target_c,
+            float(target_capacity_w),
+        )
+        air_speed_solved = True
+    elif _air_pressure_ratio_is_derived(config):
         iteration_count = _solve_air_speed_for_t5(config, model, startup_cfg, unknowns, t5_target_c)
         air_speed_solved = True
     else:
         iteration_count = _solve_air_pressure_ratio_for_t5(config, model, startup_cfg, unknowns, t5_target_c)
         air_speed_solved = False
 
-    target_capacity_w = startup_cfg.get("target_vcc_cooling_capacity_w")
-    target_m_air = startup_cfg.get("target_air_mass_flow_kg_s")
-    fixed_vcc_speed_rpm = startup_cfg.get("fixed_vcc_compressor_speed_rpm")
-    vcc_speed_solved = False
     if target_capacity_w is not None and _air_compressor_speed_controls_mass_flow(config):
         iteration_count += _solve_air_speed_for_evaporator_capacity(config, model, startup_cfg, unknowns, float(target_capacity_w))
         air_speed_solved = True
@@ -508,6 +772,18 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
             check_range=bool(compressor_cfg.get("check_range", False)),
         )
         m_ref = compressor_map["mdot_kg_s"]
+        if compressor_uses_map_power_pressure_lift(compressor_cfg) and compressor_cfg.get("fit_eta_is_from_startup", True):
+            eta_fit = compressor_eta_is_from_map_power(
+                p_cond_from_tcond,
+                h7_target,
+                s7_target,
+                m_ref,
+                compressor_map["P_W"],
+                ref_fluid,
+            )
+            eta_min = float(compressor_cfg.get("eta_is_min", 0.4))
+            eta_max = float(compressor_cfg.get("eta_is_max", 0.95))
+            compressor_cfg["eta_is"] = float(np.clip(eta_fit, eta_min, eta_max))
         if compressor_uses_map_power_pressure_lift(compressor_cfg):
             p_cond = compressor_discharge_pressure_from_power(
                 p_evap,
@@ -548,6 +824,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
     free_parameter_values = {
         path: float(get_path(config, path))
         for path in PAPER_DESIGN_SOLVED_PATHS
+        if _path_exists(config, path)
         if path != "air_cycle.compressor_mass_flow.speed_rpm" or air_speed_solved
         if path != "air_cycle.pressure_ratio" or not _air_pressure_ratio_is_derived(config)
         if path != "vcc_cycle.compressor.speed_rpm" or vcc_speed_solved
@@ -642,6 +919,7 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
             free_parameter_values = {
                 path: float(get_path(config, path))
                 for path in PAPER_DESIGN_SOLVED_PATHS
+                if _path_exists(config, path)
                 if f"startup_solved_{path.replace('.', '_')}" in result.snapshot
             }
             _save_startup_cache(
