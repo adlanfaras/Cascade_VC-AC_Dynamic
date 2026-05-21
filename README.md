@@ -40,8 +40,8 @@ Component models:
   evaporator heat removal
 - expansion valve: isenthalpic with linear pressure-drop flow equation
 - bottom-side air compressor: variable-speed head-to-volumetric-flow polynomial
-  with a damper-resistance option that derives dry-air mass flow from the
-  compressor map and flow resistance
+  with a perfect-damper option that holds dry-air mass flow constant during
+  transients
 - ammonia compressor: BITZER W6FA-K R717 variable-speed map for cooling
   capacity, shaft power, and refrigerant mass flow
 
@@ -66,16 +66,19 @@ the regenerator LMTD is based on:
 LMTD_reg = LMTD(T3 - T6, T4 - Troom)
 ```
 
-The reference case uses the damper-resistance air-flow mode. The humid-air
+The reference case uses the perfect-damper air-flow mode. The humid-air
 properties are expressed per kg of dry air, so `m_air` is the dry-air mass flow.
-In this mode the compressor map gives volumetric flow as a function of head and
-speed, while the damper/system resistance requires:
+In this mode `m_air` is held at `fixed_m_dot_kg_s` during the transient.
+Startup derives that fixed value from the target cascade load, then compressor
+speed selects the map head that corresponds to that flow:
 
 ```text
-H = H_static + K_damper * (Q / opening)^2
+Q_cascade,target = Q_evap,target - Q_dock
+m_air = Q_cascade,target / (h2 - h3)
+Q_target = m_air / rho_dry_air,suction
+H = inverse_map(Q_target, rpm)
 h_is = H * g
 P2/P1 = pressure ratio that gives J(P2, s1, x_room) - J1 = h_is
-m_air = Q * rho_dry_air,suction
 ```
 
 So `air_cycle.pressure_ratio` is not constant in this mode; it is reported to
@@ -182,10 +185,10 @@ T1 = TRS + eR * (T3 - TRS)
 ```
 
 In this codebase, `room_c` corresponds to `TRS`, and `t6_c` corresponds to the
-compressor inlet `T1`. In damper-resistance air mode, the initializer solves the
-air head that gives the target humid-air turbine outlet temperature, derives the
-air mass flow from `Q_evap,target - Q_dock`, and back-calculates the damper
-resistance at the configured startup opening. It also back-calculates the room
+compressor inlet `T1`. In perfect-damper air mode, the initializer solves the air
+head that gives the target humid-air turbine outlet temperature, derives the
+fixed air mass flow from `Q_evap,target - Q_dock`, and solves the compressor
+speed that maps that flow to the target head. It also back-calculates the room
 load, heat-exchanger UAs, sink flow, refrigerant compressor efficiency,
 refrigerant mass flow, and expansion-valve opening so the coupled model starts
 from that paper-like state.

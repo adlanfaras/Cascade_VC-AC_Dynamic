@@ -29,7 +29,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 13
+STARTUP_CACHE_VERSION = 14
 
 STATE_INDEX = {
     "room_c": 0,
@@ -56,6 +56,7 @@ DEFAULT_STARTUP_FREE_STATE_VARIABLES = ["t3_c", "t4_c", "t6_c", "m_ref_kg_s"]
 PAPER_DESIGN_SOLVED_PATHS = [
     "air_cycle.pressure_ratio",
     "air_cycle.compressor_mass_flow.speed_rpm",
+    "air_cycle.compressor_mass_flow.fixed_m_dot_kg_s",
     "air_cycle.compressor_mass_flow.damper_opening",
     "air_cycle.compressor_mass_flow.damper_resistance_head_coefficient",
     "air_cycle.compressor_mass_flow.system_static_head_m",
@@ -223,6 +224,11 @@ def _air_compressor_speed_controls_mass_flow(config: dict[str, Any]) -> bool:
 def _air_compressor_uses_damper_resistance(config: dict[str, Any]) -> bool:
     model = config["air_cycle"]["compressor_mass_flow"].get("model", "polynomial_volumetric_flow_head")
     return model == "polynomial_volumetric_flow_head_speed_damper"
+
+
+def _air_compressor_uses_constant_mass_flow(config: dict[str, Any]) -> bool:
+    model = config["air_cycle"]["compressor_mass_flow"].get("model", "polynomial_volumetric_flow_head")
+    return model == "polynomial_volumetric_flow_head_speed_constant_mass_flow"
 
 
 def _air_pressure_ratio_is_derived(config: dict[str, Any]) -> bool:
@@ -657,6 +663,32 @@ def _initialize_air_damper_for_evaporator_capacity(
     return iterations
 
 
+def _initialize_constant_air_flow_for_evaporator_capacity(
+    config: dict[str, Any],
+    model: CascadeSystemModel,
+    startup_cfg: dict[str, Any],
+    unknowns: np.ndarray,
+    t5_target_c: float,
+    target_capacity_w: float,
+) -> int:
+    _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
+    flow_cfg = config["air_cycle"]["compressor_mass_flow"]
+    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)
+    target_q_cascade_w = float(target_capacity_w) - q_dock
+    if target_q_cascade_w <= 0.0:
+        raise RuntimeError(
+            f"Target evaporator capacity {target_capacity_w:.3f} W is not above dock load {q_dock:.3f} W."
+        )
+
+    head_m, metrics, iterations = _solve_air_head_for_t5(config, model, startup_cfg, unknowns, t5_target_c)
+    target_m_air_kg_s = target_q_cascade_w / max(metrics["h2_minus_h3"], 1.0e-9)
+    target_q_m3_s = target_m_air_kg_s / max(metrics["rho1"], 1.0e-9)
+    flow_cfg["fixed_m_dot_kg_s"] = float(target_m_air_kg_s)
+    flow_cfg["startup_target_q_cascade_w"] = float(target_q_cascade_w)
+    iterations += _solve_air_speed_for_head_and_flow(config, startup_cfg, head_m, target_q_m3_s)
+    return iterations
+
+
 def _solve_vcc_speed_for_map_capacity(
     config: dict[str, Any],
     startup_cfg: dict[str, Any],
@@ -718,7 +750,17 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
     target_m_air = startup_cfg.get("target_air_mass_flow_kg_s")
     fixed_vcc_speed_rpm = startup_cfg.get("fixed_vcc_compressor_speed_rpm")
     vcc_speed_solved = False
-    if _air_compressor_uses_damper_resistance(config) and target_capacity_w is not None:
+    if _air_compressor_uses_constant_mass_flow(config) and target_capacity_w is not None:
+        iteration_count = _initialize_constant_air_flow_for_evaporator_capacity(
+            config,
+            model,
+            startup_cfg,
+            unknowns,
+            t5_target_c,
+            float(target_capacity_w),
+        )
+        air_speed_solved = True
+    elif _air_compressor_uses_damper_resistance(config) and target_capacity_w is not None:
         iteration_count = _initialize_air_damper_for_evaporator_capacity(
             config,
             model,
