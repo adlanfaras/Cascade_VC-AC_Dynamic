@@ -155,6 +155,24 @@ Run the 30 s, 60 s, and 120 s door-opening cases in parallel:
 python -m src.cascade_dynamics.main --config config/paper_reference_case.json --door-open-durations 30 60 120 --parallel --workers 3
 ```
 
+Run the dock-only infiltration case:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case_dock_infiltration.json
+```
+
+Run one dock-only door-duration variation:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case_dock_infiltration.json --door-open-duration 30
+```
+
+Run the 30 s, 60 s, and 120 s dock-only door-opening cases in parallel:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case_dock_infiltration.json --door-open-durations 30 60 120 --parallel --workers 3
+```
+
 Append a stable output version tag:
 
 ```powershell
@@ -286,6 +304,35 @@ and the dock receives the equal-and-opposite load, preserving the coupled
 room-to-dock exchange logic. With `outdoor_source: "dock"`, `T_o` follows the
 dynamic dock temperature. Use `outdoor_source: "ambient"` for the configured
 ambient temperature or `outdoor_source: "fixed"` with `outdoor_c`.
+
+For loading-dock-only infiltration, route the calculated heat gain only to the
+dock and use a larger exterior dock door:
+
+```json
+{
+  "enabled": true,
+  "model": "tian_unsteady",
+  "indoor_source": "dock",
+  "outdoor_source": "ambient",
+  "load_application": "dock_only",
+  "indoor_relative_humidity": 0.65,
+  "outdoor_relative_humidity": 0.65,
+  "door": {
+    "width_m": 2.4,
+    "height_m": 3.0
+  },
+  "dock": {
+    "width_m": 6.0,
+    "length_m": 10.0,
+    "height_m": 3.0
+  }
+}
+```
+
+In this mode, `infiltration_room_w` remains zero and
+`infiltration_dock_w = infiltration_total_w`, so `dock_load_w` increases during
+the door event. The included
+`config/paper_reference_case_dock_infiltration.json` file defines this case.
 
 The effective infiltration length defaults to the conservative fallback
 `L_el = L_c`. If a calibrated or paper-specific maximum is available, set

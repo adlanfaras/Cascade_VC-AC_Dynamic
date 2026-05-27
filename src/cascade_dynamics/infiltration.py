@@ -42,6 +42,17 @@ def zero_infiltration_result() -> dict[str, float]:
     }
 
 
+def apply_infiltration_load_application(cfg: dict[str, Any], load_w: float) -> tuple[float, float]:
+    mode = str(cfg.get("load_application", cfg.get("application", "room_dock_exchange"))).lower()
+    if mode in {"room_dock_exchange", "exchange", "room_to_dock_exchange"}:
+        return load_w, -load_w
+    if mode in {"dock_only", "loading_dock_only", "dock"}:
+        return 0.0, load_w
+    if mode in {"room_only", "refrigerated_space_only", "cold_room_only"}:
+        return load_w, 0.0
+    raise ValueError(f"Unsupported infiltration load_application: {mode}")
+
+
 def dry_air_density(temperature_k: float, pressure_pa: float) -> float:
     return float(pressure_pa) / (R_AIR * max(float(temperature_k), 1.0))
 
@@ -120,12 +131,35 @@ def door_open_fraction(cfg: dict[str, Any], time_s: float) -> float:
 
 def tian_geometry(cfg: dict[str, Any], opening_fraction: float) -> dict[str, float]:
     door = cfg.get("door", {})
-    room = cfg.get("room", {})
+    indoor_source = str(cfg.get("indoor_source", "room")).lower()
+    fallback_room = cfg.get("room", {})
+    if "indoor" in cfg:
+        room = cfg["indoor"]
+    elif indoor_source in {"dock", "loading_dock"} and "dock" in cfg:
+        room = cfg["dock"]
+    else:
+        room = fallback_room
     w_d = _value_from_nested(cfg, ("W_d",), ("door_width_m",), default=door.get("width_m"))
     h_d = _value_from_nested(cfg, ("H_d",), ("door_height_m",), default=door.get("height_m"))
-    w_c = _value_from_nested(cfg, ("W_c",), ("room_width_m",), default=room.get("width_m"))
-    l_c = _value_from_nested(cfg, ("L_c",), ("room_length_m",), ("room_depth_m",), default=room.get("length_m", room.get("depth_m")))
-    h_c = _value_from_nested(cfg, ("H_c",), ("room_height_m",), default=room.get("height_m"))
+    w_c = _value_from_nested(
+        cfg,
+        ("W_c",),
+        ("room_width_m",),
+        default=room.get("width_m", fallback_room.get("width_m")),
+    )
+    l_c = _value_from_nested(
+        cfg,
+        ("L_c",),
+        ("room_length_m",),
+        ("room_depth_m",),
+        default=room.get("length_m", room.get("depth_m", fallback_room.get("length_m", fallback_room.get("depth_m")))),
+    )
+    h_c = _value_from_nested(
+        cfg,
+        ("H_c",),
+        ("room_height_m",),
+        default=room.get("height_m", fallback_room.get("height_m")),
+    )
 
     effective_width = max(w_d * opening_fraction, 1.0e-9)
     a_d = w_d * h_d * opening_fraction
@@ -231,7 +265,9 @@ def advance_tian_infiltration(
     room_k = float(room_c) + KELVIN_OFFSET
     outdoor_k = float(outdoor_c) + KELVIN_OFFSET
     if omega_room is None:
-        omega_room = humidity_ratio_from_config(cfg, "room", room_k, pressure_i_pa)
+        omega_room = humidity_ratio_from_config(cfg, "indoor", room_k, pressure_i_pa)
+        if omega_room is None:
+            omega_room = humidity_ratio_from_config(cfg, "room", room_k, pressure_i_pa)
     if omega_outdoor is None:
         omega_outdoor = humidity_ratio_from_config(cfg, "outdoor", outdoor_k, pressure_o_pa)
 
@@ -264,10 +300,11 @@ def advance_tian_infiltration(
         h_latent = float(cfg.get("h_latent_freezing", H_FG + H_FUSION) if room_k < KELVIN_OFFSET else cfg.get("h_fg", H_FG))
         latent_w = q_effective * rho_o * max(omega_outdoor - omega_room, 0.0) * h_latent
     total_w = sensible_w + latent_w
+    room_w, dock_w = apply_infiltration_load_application(cfg, total_w)
 
     return {
-        "room_w": total_w,
-        "dock_w": -total_w,
+        "room_w": room_w,
+        "dock_w": dock_w,
         "q_m3_s": q_effective,
         "q_unprotected_m3_s": q_unprotected,
         "q_sensible_w": sensible_w,
