@@ -39,6 +39,8 @@ def zero_infiltration_result() -> dict[str, float]:
         "stage": 0.0,
         "door_open_fraction": 0.0,
         "effective_length_m": 0.0,
+        "effective_volume_m3": 0.0,
+        "maximum_effective_length_m": 0.0,
     }
 
 
@@ -98,6 +100,91 @@ def _value_from_nested(cfg: dict[str, Any], *paths: tuple[str, ...], default: fl
     if default is None:
         raise KeyError("Missing required infiltration configuration value.")
     return float(default)
+
+
+def _effective_length_limit(cfg: dict[str, Any], room_length_m: float) -> float:
+    l_max = cfg.get("L_max_m", cfg.get("l_max_m"))
+    if l_max is None:
+        return room_length_m
+    return float(np.clip(float(l_max), 1.0e-9, room_length_m))
+
+
+def _door_spread_effective_plan_area(
+    room_width_m: float,
+    room_length_m: float,
+    open_door_width_m: float,
+    spread_angle_deg: float,
+) -> float:
+    width_0 = float(np.clip(open_door_width_m, 1.0e-9, room_width_m))
+    length = max(float(room_length_m), 1.0e-9)
+    width_room = max(float(room_width_m), width_0)
+    spread = math.tan(math.radians(float(spread_angle_deg)))
+    if spread <= 1.0e-9:
+        return width_0 * length
+
+    distance_to_full_width = max((width_room - width_0) / (2.0 * spread), 0.0)
+    spreading_length = min(length, distance_to_full_width)
+    area = width_0 * spreading_length + spread * spreading_length * spreading_length
+    if length > spreading_length:
+        area += width_room * (length - spreading_length)
+    return max(area, 1.0e-9)
+
+
+def _tian_empirical_max_effective_length(
+    effective_diameter_m: float,
+    flow_area_m2: float,
+    nozzle_constant: float,
+) -> float:
+    diameter = max(float(effective_diameter_m), 1.0e-9)
+    area = max(float(flow_area_m2), 1.0e-12)
+    area_ratio = math.sqrt(area) / diameter
+    exponent = 0.147 * area_ratio - 0.133
+    base = 3.58 * area_ratio + float(nozzle_constant)
+    return diameter * max(base, 1.0e-12) ** exponent
+
+
+def _tian_effective_length_and_volume(
+    cfg: dict[str, Any],
+    room_width_m: float,
+    room_length_m: float,
+    room_height_m: float,
+    open_door_width_m: float,
+    effective_diameter_m: float,
+    flow_area_m2: float,
+) -> tuple[float, float, float]:
+    if "effective_length_m" in cfg:
+        length_m = float(np.clip(float(cfg["effective_length_m"]), 1.0e-9, room_length_m))
+        volume_m3 = open_door_width_m * length_m * room_height_m
+        return length_m, max(volume_m3, 1.0e-9), length_m
+
+    length_limit_m = _effective_length_limit(cfg, room_length_m)
+    model = str(cfg.get("effective_length_model", "tian_empirical")).lower()
+    if model in {"room_depth", "legacy", "full_depth"}:
+        length_m = length_limit_m
+        volume_m3 = open_door_width_m * length_m * room_height_m
+        return length_m, max(volume_m3, 1.0e-9), length_m
+
+    if model in {"tian_empirical", "tian", "paper", "jet_empirical"}:
+        nozzle_constant = float(cfg.get("effective_nozzle_constant", cfg.get("a_effective_length", 0.1)))
+        l_max = _tian_empirical_max_effective_length(effective_diameter_m, flow_area_m2, nozzle_constant)
+        length_m = min(l_max, length_limit_m)
+        volume_m3 = open_door_width_m * length_m * room_height_m
+        return float(np.clip(length_m, 1.0e-9, room_length_m)), max(volume_m3, 1.0e-9), l_max
+
+    if model in {"door_spread", "spread", "wedge", "tian_spread"}:
+        angle_deg = float(cfg.get("effective_spread_angle_deg", cfg.get("spread_angle_deg", 30.0)))
+        plan_area_m2 = _door_spread_effective_plan_area(
+            room_width_m=room_width_m,
+            room_length_m=length_limit_m,
+            open_door_width_m=open_door_width_m,
+            spread_angle_deg=angle_deg,
+        )
+        length_m = plan_area_m2 / max(room_width_m, 1.0e-9)
+        volume_m3 = plan_area_m2 * room_height_m
+        length_m = float(np.clip(length_m, 1.0e-9, room_length_m))
+        return length_m, max(volume_m3, 1.0e-9), length_m
+
+    raise ValueError(f"Unsupported Tian effective_length_model: {model}")
 
 
 def _door_events(cfg: dict[str, Any]) -> list[tuple[float, float]]:
@@ -168,15 +255,15 @@ def tian_geometry(cfg: dict[str, Any], opening_fraction: float) -> dict[str, flo
     p_wetted = 2.0 * (effective_width + half_height)
     d_e = 4.0 * max(a_flow, 1.0e-12) / max(p_wetted, 1.0e-12)
 
-    if "effective_length_m" in cfg:
-        l_el = float(cfg["effective_length_m"])
-        l_el = float(np.clip(l_el, 1.0e-9, l_c))
-    else:
-        l_max = cfg.get("L_max_m", cfg.get("l_max_m"))
-        if l_max is None:
-            l_max = l_c
-        l_el = min(float(l_max), l_c)
-        l_el = float(np.clip(l_el, 0.5 * l_c, l_c))
+    l_el, v_eff, l_max = _tian_effective_length_and_volume(
+        cfg,
+        room_width_m=w_c,
+        room_length_m=l_c,
+        room_height_m=h_c,
+        open_door_width_m=effective_width,
+        effective_diameter_m=d_e,
+        flow_area_m2=a_flow,
+    )
 
     return {
         "W_d": w_d,
@@ -187,8 +274,9 @@ def tian_geometry(cfg: dict[str, Any], opening_fraction: float) -> dict[str, flo
         "A_d": a_d,
         "A_flow": a_flow,
         "D_e": d_e,
+        "L_max": l_max,
         "L_el": l_el,
-        "V_eff": max(w_d * opening_fraction * l_el * h_c, 1.0e-9),
+        "V_eff": v_eff,
         "V_c": max(w_c * l_c * h_c, 1.0e-9),
         "l_tl": max(2.0 * (l_el + h_c - h_d), 1.0e-9),
     }
@@ -320,4 +408,6 @@ def advance_tian_infiltration(
         "stage": 1.0 + stage2,
         "door_open_fraction": fraction,
         "effective_length_m": geom["L_el"],
+        "effective_volume_m3": geom["V_eff"],
+        "maximum_effective_length_m": geom["L_max"],
     }
