@@ -20,6 +20,7 @@ from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actua
 from .fluids import h_refrigerant_liquid, p_sat
 from .humid_air import humid_air_state, saturated_room_humidity_ratio, state_at_enthalpy, state_at_entropy
 from .model import (
+    CP_DOCK_AIR,
     CascadeSystemModel,
     compressor_discharge_pressure_from_power,
     compressor_eta_is_from_map_power,
@@ -29,7 +30,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 14
+STARTUP_CACHE_VERSION = 16
 
 STATE_INDEX = {
     "room_c": 0,
@@ -62,6 +63,7 @@ PAPER_DESIGN_SOLVED_PATHS = [
     "air_cycle.compressor_mass_flow.system_static_head_m",
     "air_cycle.regenerator_ua_w_k",
     "vcc_cycle.cascade_ua_w_k",
+    "vcc_cycle.dock_evaporator.ua_w_k",
     "vcc_cycle.condenser_ua_w_k",
     "vcc_cycle.compressor.speed_rpm",
     "vcc_cycle.compressor.eta_is",
@@ -246,6 +248,55 @@ def _set_and_mirror_room_load(config: dict[str, Any], value_w: float) -> None:
         config["boundary_conditions"]["load_after_w"] = float(value_w)
 
 
+def _dock_air_flow_fan_heat_w(dock_cfg: dict[str, Any], air_m_dot_kg_s: float) -> float:
+    design_air_m_dot = max(float(dock_cfg.get("design_air_m_dot_kg_s", air_m_dot_kg_s)), 1.0e-9)
+    flow_ratio = max(float(air_m_dot_kg_s) / design_air_m_dot, 0.0)
+    power_ref_w = float(dock_cfg.get("fan_power_ref_w", dock_cfg.get("power_ref_w", 0.0)))
+    power_exponent = float(dock_cfg.get("fan_power_exponent", dock_cfg.get("power_exponent", 3.0)))
+    heat_fraction = float(dock_cfg.get("fan_heat_fraction_to_dock", dock_cfg.get("heat_fraction_to_dock", 1.0)))
+    return power_ref_w * flow_ratio**power_exponent * heat_fraction
+
+
+def _backcalculate_dock_evaporator_design(config: dict[str, Any], unknowns: np.ndarray) -> None:
+    dock_cfg = config["vcc_cycle"].get("dock_evaporator")
+    if not isinstance(dock_cfg, dict):
+        return
+    model = str(dock_cfg.get("model", "")).lower()
+    if model not in {"ua_lmtd_air", "air_lmtd", "lmtd_air"}:
+        return
+    if not dock_cfg.get("startup_backcalculate_ua_w_k", dock_cfg.get("backcalculate_ua_from_startup", True)):
+        return
+
+    _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
+    design_air_m_dot = float(dock_cfg.get("design_air_m_dot_kg_s", dock_cfg.get("air_m_dot_kg_s", 3.5)))
+    air_m_dot_min = float(dock_cfg.get("air_m_dot_min_kg_s", 0.0))
+    air_m_dot_max = float(dock_cfg.get("air_m_dot_max_kg_s", max(design_air_m_dot, air_m_dot_min)))
+    air_m_dot_max = max(air_m_dot_max, air_m_dot_min)
+    design_air_m_dot = float(np.clip(design_air_m_dot, air_m_dot_min, air_m_dot_max))
+    cp_air = float(dock_cfg.get("air_cp_j_kg_k", CP_DOCK_AIR))
+    mcp = design_air_m_dot * cp_air
+    if mcp <= 0.0:
+        raise RuntimeError("Dock evaporator design air mass flow must be positive for startup UA back-calculation.")
+
+    fan_heat_w = _dock_air_flow_fan_heat_w(dock_cfg, design_air_m_dot)
+    q_design_w = float(config["boundary_conditions"]["dock_load_before_w"]) + fan_heat_w
+    air_outlet_c = dock_c - q_design_w / mcp
+    if air_outlet_c <= tevap_c:
+        raise RuntimeError(
+            "Dock evaporator design air flow is too low for the startup dock load: "
+            f"air outlet would be {air_outlet_c:.3f} C at refrigerant evaporating temperature {tevap_c:.3f} C. "
+            "Increase vcc_cycle.dock_evaporator.design_air_m_dot_kg_s."
+        )
+    lmtd_k = positive_lmtd(dock_c - tevap_c, air_outlet_c - tevap_c)
+    ua_w_k = q_design_w / max(lmtd_k, 1.0e-9)
+
+    dock_cfg["air_m_dot_kg_s"] = design_air_m_dot
+    dock_cfg["ua_w_k"] = float(ua_w_k)
+    dock_cfg["startup_design_air_outlet_c"] = float(air_outlet_c)
+    dock_cfg["startup_design_lmtd_k"] = float(lmtd_k)
+    dock_cfg["startup_design_q_dock_w"] = float(q_design_w)
+
+
 def _solve_scalar_bisection(
     residual_fn,
     lower: float,
@@ -406,7 +457,7 @@ def _solve_air_speed_for_evaporator_capacity(
             t4_c + KELVIN_OFFSET,
             t6_c + KELVIN_OFFSET,
         )
-        q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)
+        q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
         return np.array([(air["q_cascade"] + q_dock - target_capacity_w) / max(target_capacity_w, 1.0)], dtype=float)
 
     result = least_squares(
@@ -631,7 +682,7 @@ def _initialize_air_damper_for_evaporator_capacity(
 ) -> int:
     _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
-    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)
+    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     target_q_cascade_w = float(target_capacity_w) - q_dock
     if target_q_cascade_w <= 0.0:
         raise RuntimeError(
@@ -673,7 +724,7 @@ def _initialize_constant_air_flow_for_evaporator_capacity(
 ) -> int:
     _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
-    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)
+    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     target_q_cascade_w = float(target_capacity_w) - q_dock
     if target_q_cascade_w <= 0.0:
         raise RuntimeError(
@@ -746,6 +797,7 @@ def _build_paper_design_unknowns(config: dict[str, Any], startup_cfg: dict[str, 
 
 def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSystemModel, startup_cfg: dict[str, Any], time_s: float) -> StartupInitializationResult:
     unknowns, t5_target_c = _build_paper_design_unknowns(config, startup_cfg)
+    _backcalculate_dock_evaporator_design(config, unknowns)
     target_capacity_w = startup_cfg.get("target_vcc_cooling_capacity_w")
     target_m_air = startup_cfg.get("target_air_mass_flow_kg_s")
     fixed_vcc_speed_rpm = startup_cfg.get("fixed_vcc_compressor_speed_rpm")
@@ -786,7 +838,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
 
     room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, _, dock_c = unknowns
     air = model._evaluate_air_cycle(room_c + KELVIN_OFFSET, t3_c + KELVIN_OFFSET, t4_c + KELVIN_OFFSET, t6_c + KELVIN_OFFSET)
-    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)
+    q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     q_evap_total = air["q_cascade"] + q_dock
 
     ref_fluid = config["fluids"]["refrigerant"]

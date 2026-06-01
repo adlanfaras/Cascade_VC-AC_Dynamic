@@ -25,6 +25,7 @@ from .infiltration import (
 
 
 KELVIN_OFFSET = 273.15
+CP_DOCK_AIR = 1005.0
 MAP_POWER_PRESSURE_LIFT_MODES = {
     "map_power_backcalculate",
     "map_power_lift",
@@ -302,6 +303,12 @@ class CascadeSystemModel:
     def dock_load_w(self, time_s: float) -> float:
         return self._base_dock_load_w(time_s) + self.infiltration_disturbance_w(time_s)["dock_w"]
 
+    def _dock_evaporator_config(self) -> dict:
+        vcc_cfg = self.cfg["vcc_cycle"]
+        dock_cfg = dict(vcc_cfg.get("dock_evaporator", {}))
+        dock_cfg.setdefault("ua_w_k", vcc_cfg.get("dock_evaporator_ua_w_k", 0.0))
+        return dock_cfg
+
     def startup_evaluation(self, unknowns: np.ndarray, time_s: float) -> tuple[np.ndarray, dict[str, float]]:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
         room_k = room_c + KELVIN_OFFSET
@@ -317,7 +324,9 @@ class CascadeSystemModel:
         ambient_c = bc["ambient_c"]
 
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
-        q_dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        q_dock_evap = dock_evap["q_w"]
+        dock_fan_heat = dock_evap["fan_heat_w"]
         infiltration = self.infiltration_disturbance_w(time_s)
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
 
@@ -338,7 +347,7 @@ class CascadeSystemModel:
         balances = np.array(
             [
                 air["q_room"] - self.load_w(time_s),
-                q_dock_evap - self.dock_load_w(time_s),
+                q_dock_evap - (self.dock_load_w(time_s) + dock_fan_heat),
                 ref["q_cond"] - sink_rejection,
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -380,6 +389,13 @@ class CascadeSystemModel:
             "humidity_ratio_supply_ice_kg_kg_da": air["humidity_ratio_5_ice"],
             "ice_mass_flow_kg_s": air["ice_mass_flow"],
             "q_dock_w": q_dock_evap,
+            "dock_evaporator_ua_w_k": dock_evap["ua_w_k"],
+            "dock_evaporator_lmtd_k": dock_evap["lmtd_k"],
+            "dock_evaporator_air_outlet_c": dock_evap["air_outlet_c"],
+            "dock_evaporator_air_delta_t_k": dock_evap["air_delta_t_k"],
+            "dock_air_m_dot_kg_s": dock_evap["air_m_dot_kg_s"],
+            "dock_fan_power_w": dock_evap["fan_power_w"],
+            "dock_fan_heat_w": dock_fan_heat,
             "q_evap_total_w": ref["q_evap_total"],
             "q_evap_load_requested_w": ref["q_evap_load_requested"],
             "q_map_capacity_balance_error_w": ref["q_map_capacity_balance_error"],
@@ -671,9 +687,62 @@ class CascadeSystemModel:
             "compressor_map_q_w": compressor_map_q_w,
         }
 
-    def _evaluate_dock_evaporator(self, dock_c: float, tevap_c: float) -> float:
-        ua_w_k = float(self.cfg["vcc_cycle"].get("dock_evaporator_ua_w_k", 0.0))
-        return ua_w_k * max(dock_c - tevap_c, 0.0)
+    def _evaluate_dock_evaporator(self, dock_c: float, tevap_c: float) -> dict[str, float]:
+        dock_cfg = self._dock_evaporator_config()
+        ua_w_k = float(dock_cfg.get("ua_w_k", dock_cfg.get("ua_ref_w_k", 0.0)))
+        model = str(dock_cfg.get("model", "fixed_ua")).lower()
+        air_m_dot = 0.0
+        air_flow_ratio = 0.0
+        fan_power_w = 0.0
+        fan_heat_w = 0.0
+        lmtd_k = max(dock_c - tevap_c, 0.0)
+        air_outlet_c = dock_c
+        air_delta_t_k = 0.0
+        air_cp = float(dock_cfg.get("air_cp_j_kg_k", CP_DOCK_AIR))
+
+        if model in {"ua_lmtd_air", "air_lmtd", "lmtd_air"}:
+            air_m_dot = float(dock_cfg.get("air_m_dot_kg_s", dock_cfg.get("design_air_m_dot_kg_s", 0.0)))
+            air_m_dot_min = float(dock_cfg.get("air_m_dot_min_kg_s", 0.0))
+            air_m_dot_max = float(dock_cfg.get("air_m_dot_max_kg_s", max(air_m_dot, air_m_dot_min)))
+            air_m_dot_max = max(air_m_dot_max, air_m_dot_min)
+            air_m_dot = float(np.clip(air_m_dot, air_m_dot_min, air_m_dot_max))
+            air_m_dot_ref = max(float(dock_cfg.get("design_air_m_dot_kg_s", air_m_dot)), 1.0e-9)
+            air_flow_ratio = max(air_m_dot / air_m_dot_ref, 0.0)
+
+            power_ref_w = float(dock_cfg.get("fan_power_ref_w", dock_cfg.get("power_ref_w", 0.0)))
+            power_exponent = float(dock_cfg.get("fan_power_exponent", dock_cfg.get("power_exponent", 3.0)))
+            fan_power_w = power_ref_w * air_flow_ratio**power_exponent
+            fan_heat_fraction = float(dock_cfg.get("fan_heat_fraction_to_dock", dock_cfg.get("heat_fraction_to_dock", 1.0)))
+            fan_heat_w = fan_power_w * fan_heat_fraction
+
+            delta_t_in = max(dock_c - tevap_c, 0.0)
+            mcp = air_m_dot * air_cp
+            if delta_t_in > 0.0 and ua_w_k > 0.0 and mcp > 0.0:
+                ntu = ua_w_k / mcp
+                air_outlet_c = tevap_c + delta_t_in * float(np.exp(-ntu))
+                air_delta_t_k = max(dock_c - air_outlet_c, 0.0)
+                q_w = mcp * air_delta_t_k
+                lmtd_k = positive_lmtd(delta_t_in, max(air_outlet_c - tevap_c, 0.0))
+            else:
+                q_w = 0.0
+        else:
+            q_w = ua_w_k * max(dock_c - tevap_c, 0.0)
+
+        return {
+            "q_w": q_w,
+            "ua_w_k": ua_w_k,
+            "ua_ref_w_k": ua_w_k,
+            "lmtd_k": lmtd_k,
+            "air_m_dot_kg_s": air_m_dot,
+            "air_cp_j_kg_k": air_cp,
+            "air_inlet_c": dock_c,
+            "air_outlet_c": air_outlet_c,
+            "air_delta_t_k": air_delta_t_k,
+            "fan_m_dot_kg_s": air_m_dot,
+            "fan_flow_ratio": air_flow_ratio,
+            "fan_power_w": fan_power_w,
+            "fan_heat_w": fan_heat_w,
+        }
 
     def residual(self, unknowns: np.ndarray, prev_state: np.ndarray, time_s: float, dt_s: float) -> np.ndarray:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
@@ -698,7 +767,8 @@ class CascadeSystemModel:
 
         try:
             air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
-            q_dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+            dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+            q_dock_evap = dock_evap["q_w"]
             ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
         except ValueError:
             return np.full(9, 1.0e9, dtype=float)
@@ -714,6 +784,7 @@ class CascadeSystemModel:
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
         room_load_w = self.load_w(time_s)
         dock_load_w = self.dock_load_w(time_s)
+        dock_fan_heat = dock_evap["fan_heat_w"]
         if ref["uses_map_cooling_capacity_balance"]:
             cascade_balance = ref["q_evap_load_requested"] - ref["compressor_map_q_w"]
         else:
@@ -722,7 +793,7 @@ class CascadeSystemModel:
         res = np.array(
             [
                 room_c - prev_room_c - dt_s * (room_load_w - air["q_room"]) / caps["room_capacitance_j_k"],
-                dock_c - prev_dock_c - dt_s * (dock_load_w - q_dock_evap) / caps["dock_capacitance_j_k"],
+                dock_c - prev_dock_c - dt_s * (dock_load_w + dock_fan_heat - q_dock_evap) / caps["dock_capacitance_j_k"],
                 sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -758,13 +829,17 @@ class CascadeSystemModel:
         tcond_k = tcond_c + KELVIN_OFFSET
         air_cfg = self.cfg["air_cycle"]
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
-        q_dock = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
+        q_dock = dock_evap["q_w"]
         infiltration = self.infiltration_disturbance_w(time_s)
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock)
         air_input_power = (air["w_air_comp"] - air["w_air_turb"]) / max(air_cfg.get("combined_drive_efficiency", 1.0), 1.0e-6)
-        useful_cooling = air["q_room"] + q_dock
-        cop = useful_cooling / max(air_input_power + ref["w_ref_comp"], 1.0)
-        cop_room_only = air["q_room"] / max(air_input_power + ref["w_ref_comp"], 1.0)
+        dock_fan_power = dock_evap["fan_power_w"]
+        q_dock_external = max(q_dock - dock_evap["fan_heat_w"], 0.0)
+        useful_cooling = air["q_room"] + q_dock_external
+        total_input_power = air_input_power + ref["w_ref_comp"] + dock_fan_power
+        cop = useful_cooling / max(total_input_power, 1.0)
+        cop_room_only = air["q_room"] / max(total_input_power, 1.0)
         t2_c = air["t2_k"] - KELVIN_OFFSET
         t5_c = air["t5_k"] - KELVIN_OFFSET
         t7_c = ref["t7_k"] - KELVIN_OFFSET
@@ -785,6 +860,7 @@ class CascadeSystemModel:
             "tcond_c": tcond_c,
             "q_room_w": air["q_room"],
             "q_dock_w": q_dock,
+            "q_dock_external_w": q_dock_external,
             "q_useful_w": useful_cooling,
             "q_cascade_w": air["q_cascade"],
             "q_evap_total_w": ref["q_evap_total"],
@@ -795,6 +871,8 @@ class CascadeSystemModel:
             "w_air_turb_w": air["w_air_turb"],
             "w_air_input_w": air_input_power,
             "w_ref_comp_w": ref["w_ref_comp"],
+            "w_dock_fan_w": dock_fan_power,
+            "w_total_input_w": total_input_power,
             "w_ref_isentropic_w": ref["w_ref_isentropic"],
             "refrigerant_compressor_speed_rpm": ref["compressor_speed_rpm"],
             "refrigerant_compressor_map_capacity_w": ref["compressor_map_q_w"],
@@ -815,6 +893,17 @@ class CascadeSystemModel:
             "air_compressor_volumetric_flow_m3_s": air["m_air"] / max(air["rho1"], 1.0e-9),
             "air_compressor_isentropic_head_j_kg": air["compressor_head_is"],
             "air_compressor_isentropic_head_m": air["compressor_head_is"] / 9.80665,
+            "dock_evaporator_ua_w_k": dock_evap["ua_w_k"],
+            "dock_evaporator_ua_ref_w_k": dock_evap["ua_ref_w_k"],
+            "dock_evaporator_lmtd_k": dock_evap["lmtd_k"],
+            "dock_evaporator_air_inlet_c": dock_evap["air_inlet_c"],
+            "dock_evaporator_air_outlet_c": dock_evap["air_outlet_c"],
+            "dock_evaporator_air_delta_t_k": dock_evap["air_delta_t_k"],
+            "dock_air_m_dot_kg_s": dock_evap["air_m_dot_kg_s"],
+            "dock_fan_m_dot_kg_s": dock_evap["fan_m_dot_kg_s"],
+            "dock_air_flow_ratio": dock_evap["fan_flow_ratio"],
+            "dock_fan_power_w": dock_fan_power,
+            "dock_fan_heat_w": dock_evap["fan_heat_w"],
             "humidity_ratio_room_kg_kg_da": air["humidity_ratio_room"],
             "humidity_ratio_supply_vapor_kg_kg_da": air["humidity_ratio_5_vapor"],
             "humidity_ratio_supply_ice_kg_kg_da": air["humidity_ratio_5_ice"],

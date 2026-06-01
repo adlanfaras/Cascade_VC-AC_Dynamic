@@ -126,7 +126,18 @@
       "check_range": false
     },
     "cascade_ua_w_k": 4216.325690412,
-    "dock_evaporator_ua_w_k": 2575.0,
+    "dock_evaporator": {
+      "model": "ua_lmtd_air",
+      "startup_backcalculate_ua_w_k": true,
+      "design_air_m_dot_kg_s": 3.5,
+      "air_m_dot_kg_s": 3.5,
+      "air_m_dot_min_kg_s": 1.0,
+      "air_m_dot_max_kg_s": 7.0,
+      "air_cp_j_kg_k": 1005.0,
+      "fan_power_ref_w": 0.0,
+      "fan_power_exponent": 3.0,
+      "fan_heat_fraction_to_dock": 1.0
+    },
     "condenser_ua_w_k": 18000.0,
     "subcooling_k": 0.0,
     "expansion_valve": {
@@ -240,6 +251,22 @@
         "Ti_min": 3.0,
         "u_min": 0.5,
         "u_max": 30.0,
+        "anti_windup": true
+      },
+      {
+        "name": "B5_loading_dock_temperature_to_dock_air_flow",
+        "enabled": true,
+        "measurement": "dock_c",
+        "setpoint": 5.0,
+        "setpoint_from_startup": "dock_c",
+        "actuator_path": "vcc_cycle.dock_evaporator.air_m_dot_kg_s",
+        "action": "direct",
+        "bias": 3.5,
+        "gain": 0.3,
+        "Ti_min": 3.0,
+        "u_min": 1.0,
+        "u_max": 7.0,
+        "actuator_rate_limit_per_s": 0.05,
         "anti_windup": true
       }
     ]
