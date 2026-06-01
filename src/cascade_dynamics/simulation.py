@@ -30,7 +30,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 16
+STARTUP_CACHE_VERSION = 17
 
 STATE_INDEX = {
     "room_c": 0,
@@ -48,7 +48,8 @@ DEFAULT_STARTUP_FREE_PARAMETERS = [
     {"path": "vcc_cycle.condenser_ua_w_k", "min": 1000.0, "max": 100000.0},
     {"path": "vcc_cycle.cascade_ua_w_k", "min": 100.0, "max": 100000.0},
     {"path": "boundary_conditions.load_before_w", "min": 1000.0, "max": 200000.0},
-    {"path": "vcc_cycle.expansion_valve.opening", "min": 0.05, "max": 1.0, "freeze_in_transient": False},
+    {"path": "vcc_cycle.expansion_valves.cascade.opening", "min": 0.05, "max": 1.0, "freeze_in_transient": False},
+    {"path": "vcc_cycle.expansion_valves.dock.opening", "min": 0.05, "max": 1.0, "freeze_in_transient": False},
     {"path": "air_cycle.pressure_ratio", "min": 1.01, "max": 1.6},
     {"path": "air_cycle.compressor_mass_flow.speed_rpm", "min": 10000.0, "max": 20000.0, "freeze_in_transient": False},
     {"path": "vcc_cycle.compressor.speed_rpm", "min": 1226.0, "max": 1610.0, "freeze_in_transient": False},
@@ -67,7 +68,8 @@ PAPER_DESIGN_SOLVED_PATHS = [
     "vcc_cycle.condenser_ua_w_k",
     "vcc_cycle.compressor.speed_rpm",
     "vcc_cycle.compressor.eta_is",
-    "vcc_cycle.expansion_valve.opening",
+    "vcc_cycle.expansion_valves.cascade.opening",
+    "vcc_cycle.expansion_valves.dock.opening",
     "boundary_conditions.load_before_w",
     "boundary_conditions.load_after_w",
     "boundary_conditions.sink_m_dot_kg_s",
@@ -896,9 +898,21 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         compressor_cfg["work_w"] = float(m_ref * (h8s - h7_target) / max(eta_is, 1.0e-6))
     unknowns[STATE_INDEX["m_ref_kg_s"]] = m_ref
 
-    valve_cfg = vcc_cfg["expansion_valve"]
-    valve_opening = m_ref / max(valve_cfg["flow_coefficient_kg_s_pa"] * max(p_cond - p_evap, 0.0), 1.0e-12)
-    valve_cfg["opening"] = float(np.clip(valve_opening, valve_cfg.get("opening_min", 0.05), valve_cfg.get("opening_max", 1.0)))
+    legacy_valve_cfg = dict(vcc_cfg.get("expansion_valve", {}))
+    branch_valves = vcc_cfg.setdefault("expansion_valves", {})
+    q_total_for_split = max(q_evap_total, 1.0e-9)
+    branch_targets = {
+        "cascade": (air["q_cascade"], m_ref * air["q_cascade"] / q_total_for_split),
+        "dock": (q_dock, m_ref * q_dock / q_total_for_split),
+    }
+    for branch, (_, branch_m_ref) in branch_targets.items():
+        valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
+        valve_cfg.setdefault("flow_coefficient_kg_s_pa", legacy_valve_cfg.get("flow_coefficient_kg_s_pa", 0.0))
+        valve_opening = branch_m_ref / max(
+            float(valve_cfg["flow_coefficient_kg_s_pa"]) * max(p_cond - p_evap, 0.0),
+            1.0e-12,
+        )
+        valve_cfg["opening"] = float(np.clip(valve_opening, valve_cfg.get("opening_min", 0.05), valve_cfg.get("opening_max", 1.0)))
 
     ref = model._evaluate_refrigerant_cycle(tevap_c + KELVIN_OFFSET, tcond_c + KELVIN_OFFSET, m_ref, air["q_cascade"], q_dock)
     reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
@@ -1092,7 +1106,7 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
     if t5_target_c is not None:
         startup_residual_size += 1
     if superheat_target_k is not None:
-        startup_residual_size += 1
+        startup_residual_size += 2
 
     def startup_residual_fn(x: np.ndarray) -> np.ndarray:
         try:
@@ -1112,7 +1126,8 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
         if room_delta_t_target_c is not None:
             extra_residuals.append(((metrics["room_c"] - metrics["t5_c"]) - float(room_delta_t_target_c)) / scales["delta_t_c"])
         if superheat_target_k is not None:
-            extra_residuals.append((metrics["refrigerant_superheat_k"] - float(superheat_target_k)) / scales["delta_t_c"])
+            extra_residuals.append((metrics["refrigerant_cascade_superheat_k"] - float(superheat_target_k)) / scales["delta_t_c"])
+            extra_residuals.append((metrics["refrigerant_dock_superheat_k"] - float(superheat_target_k)) / scales["delta_t_c"])
         return np.concatenate([residual, np.asarray(extra_residuals, dtype=float)])
 
     result = least_squares(
