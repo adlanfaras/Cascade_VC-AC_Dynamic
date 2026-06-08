@@ -114,6 +114,8 @@ class CascadeSystemModel:
         self.ref_fluid = config["fluids"]["refrigerant"]
         self._infiltration_state = TianInfiltrationState()
         self._current_infiltration = zero_infiltration_result()
+        self._branch_holdup_h: dict[str, float] = {}
+        self._branch_holdup_time_s: float | None = None
 
     def _infiltration_cfg(self) -> dict:
         return self.cfg.get("disturbances", {}).get("infiltration", {})
@@ -204,7 +206,7 @@ class CascadeSystemModel:
         )
 
     def _constraint_penalty(self, unknowns: np.ndarray) -> np.ndarray:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns
         penalties = [
             max(0.0, -83.15 - room_c),
             max(0.0, room_c - 46.85),
@@ -216,15 +218,16 @@ class CascadeSystemModel:
             max(0.0, tevap_c - 46.85),
             max(0.0, 0.0 - tcond_c),
             max(0.0, tcond_c - 90.0),
-            max(0.0, 1.0e-5 - m_ref),
-            max(0.0, m_ref - 5.0),
+            max(0.0, 1.0e-6 - m_ref_cascade),
+            max(0.0, 1.0e-6 - m_ref_dock),
+            max(0.0, m_ref_cascade + m_ref_dock - 5.0),
         ]
         penalty_sum = sum(penalties)
         if penalty_sum < 1.0e-7:
-            return np.zeros(9, dtype=float)
+            return np.zeros(10, dtype=float)
         scale = 1.0e6
         p0 = 1.0e3 + scale * penalty_sum
-        return np.full(9, p0, dtype=float)
+        return np.full(10, p0, dtype=float)
 
     def _base_room_load_w(self, time_s: float) -> float:
         bc = self.cfg["boundary_conditions"]
@@ -321,7 +324,8 @@ class CascadeSystemModel:
         return merged
 
     def startup_evaluation(self, unknowns: np.ndarray, time_s: float) -> tuple[np.ndarray, dict[str, float]]:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns
+        m_ref = m_ref_cascade + m_ref_dock
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -339,7 +343,7 @@ class CascadeSystemModel:
         q_dock_evap = dock_evap["q_w"]
         dock_fan_heat = dock_evap["fan_heat_w"]
         infiltration = self.infiltration_disturbance_w(time_s)
-        ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
+        ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref_cascade, m_ref_dock, air["q_cascade"], q_dock_evap)
 
         t2_c = air["t2_k"] - KELVIN_OFFSET
         reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
@@ -364,7 +368,8 @@ class CascadeSystemModel:
                 air["q_reg_hot"] - q_reg_ua,
                 cascade_balance,
                 ref["q_cond"] - q_cond_ua,
-                m_ref - ref["m_ref_valve"],
+                m_ref_cascade - ref["m_ref_valve_cascade"],
+                m_ref_dock - ref["m_ref_valve_dock"],
                 m_ref - ref["m_ref_compressor"],
             ],
             dtype=float,
@@ -383,6 +388,8 @@ class CascadeSystemModel:
             "tevap_c": tevap_c,
             "tcond_c": tcond_c,
             "m_ref_kg_s": m_ref,
+            "m_ref_cascade_kg_s": m_ref_cascade,
+            "m_ref_dock_kg_s": m_ref_dock,
             "m_air_kg_s": air["m_air"],
             "air_pressure_ratio": air["pressure_ratio"],
             "air_damper_opening": air["damper_opening"],
@@ -626,7 +633,15 @@ class CascadeSystemModel:
         opening = float(valve_cfg.get("opening", 0.0))
         return coefficient * opening * max(p_cond - p_evap, 0.0)
 
-    def _evaluate_refrigerant_cycle(self, tevap_k: float, tcond_k: float, m_ref: float, q_cascade: float, q_dock: float) -> dict[str, float]:
+    def _evaluate_refrigerant_cycle(
+        self,
+        tevap_k: float,
+        tcond_k: float,
+        m_ref_cascade: float,
+        m_ref_dock: float,
+        q_cascade: float,
+        q_dock: float,
+    ) -> dict[str, float]:
         vcc_cfg = self.cfg["vcc_cycle"]
         p_evap = p_sat(tevap_k, self.ref_fluid)
         p_cond_from_tcond = p_sat(tcond_k, self.ref_fluid)
@@ -639,6 +654,9 @@ class CascadeSystemModel:
         compressor_eta_is = float(compressor_cfg.get("eta_is", 1.0))
         compressor_speed_rpm = float(compressor_cfg.get("speed_rpm", 0.0))
         q_evap_load_requested = q_cascade + q_dock
+        m_ref_cascade = max(float(m_ref_cascade), 1.0e-12)
+        m_ref_dock = max(float(m_ref_dock), 1.0e-12)
+        m_ref = m_ref_cascade + m_ref_dock
         compressor_map_q_w = 0.0
         m_ref_compressor = m_ref
         w_ref_comp = 0.0
@@ -664,28 +682,16 @@ class CascadeSystemModel:
         has_branch_valves = bool(vcc_cfg.get("expansion_valves"))
 
         p_cond_for_valves = p_cond
-        h7 = h10 + evap_total / max(m_ref, 1.0e-6)
+        h_cascade_out = h10 + q_cascade_branch / max(m_ref_cascade, 1.0e-9)
+        h_dock_out = h10 + q_dock_branch / max(m_ref_dock, 1.0e-9)
+        h7 = (m_ref_cascade * h_cascade_out + m_ref_dock * h_dock_out) / max(m_ref, 1.0e-9)
         t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
         s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
-        h_cascade_out = h7
-        h_dock_out = h7
-        t_cascade_out_k = t7_k
-        t_dock_out_k = t7_k
-        m_ref_cascade = m_ref
-        m_ref_dock = 0.0
+        t_cascade_out_k = float(PropsSI("T", "P", p_evap, "H", h_cascade_out, self.ref_fluid))
+        t_dock_out_k = float(PropsSI("T", "P", p_evap, "H", h_dock_out, self.ref_fluid))
 
         if has_branch_valves:
             for _ in range(3):
-                m_cascade_nominal = self._branch_valve_flow(cascade_valve_cfg, p_cond_for_valves, p_evap)
-                m_dock_nominal = self._branch_valve_flow(dock_valve_cfg, p_cond_for_valves, p_evap)
-                m_nominal_total = max(m_cascade_nominal + m_dock_nominal, 1.0e-12)
-                m_ref_cascade = m_ref * m_cascade_nominal / m_nominal_total
-                m_ref_dock = m_ref * m_dock_nominal / m_nominal_total
-                h_cascade_out = h10 + q_cascade_branch / max(m_ref_cascade, 1.0e-9)
-                h_dock_out = h10 + q_dock_branch / max(m_ref_dock, 1.0e-9)
-                h7 = (m_ref_cascade * h_cascade_out + m_ref_dock * h_dock_out) / max(m_ref, 1.0e-9)
-                t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
-                s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
                 if compressor_cfg.get("model", "simple_isentropic") == "bitzer_variable_speed_map" and compressor_uses_map_power_pressure_lift(compressor_cfg):
                     p_cond_for_valves = compressor_discharge_pressure_from_power(
                         p_evap,
@@ -699,8 +705,6 @@ class CascadeSystemModel:
                         pressure_ratio_max=compressor_cfg.get("pressure_ratio_max"),
                     )
             p_cond = p_cond_for_valves
-            t_cascade_out_k = float(PropsSI("T", "P", p_evap, "H", h_cascade_out, self.ref_fluid))
-            t_dock_out_k = float(PropsSI("T", "P", p_evap, "H", h_dock_out, self.ref_fluid))
 
         superheat_k = t7_k - tevap_k
         superheat_cascade_k = t_cascade_out_k - tevap_k
@@ -770,11 +774,44 @@ class CascadeSystemModel:
             "m_ref_valve_dock": m_ref_valve_dock,
             "m_ref_cascade": m_ref_cascade,
             "m_ref_dock": m_ref_dock,
+            "m_ref_total": m_ref,
             "m_ref_compressor": m_ref_compressor,
             "compressor_speed_rpm": compressor_speed_rpm,
             "compressor_map_q_w": compressor_map_q_w,
             "cascade_valve_opening": float(cascade_valve_cfg.get("opening", 0.0)),
             "dock_valve_opening": float(dock_valve_cfg.get("opening", 0.0)),
+        }
+
+    def _branch_holdup_outputs(self, ref: dict[str, float], tevap_k: float, time_s: float) -> dict[str, float]:
+        holdup_cfg = self.cfg["vcc_cycle"].get("branch_holdup", {})
+        tau_s = float(holdup_cfg.get("outlet_enthalpy_time_constant_s", 0.0))
+        raw_h = {
+            "cascade": float(ref["h_cascade_out"]),
+            "dock": float(ref["h_dock_out"]),
+        }
+        if tau_s <= 0.0 or self._branch_holdup_time_s is None:
+            self._branch_holdup_h = dict(raw_h)
+        else:
+            dt_s = max(float(time_s) - self._branch_holdup_time_s, 0.0)
+            alpha = min(max(dt_s / tau_s, 0.0), 1.0)
+            for branch, h_target in raw_h.items():
+                h_previous = float(self._branch_holdup_h.get(branch, h_target))
+                self._branch_holdup_h[branch] = h_previous + alpha * (h_target - h_previous)
+        self._branch_holdup_time_s = float(time_s)
+
+        h_cascade = float(self._branch_holdup_h["cascade"])
+        h_dock = float(self._branch_holdup_h["dock"])
+        m_cascade = max(float(ref["m_ref_cascade"]), 1.0e-12)
+        m_dock = max(float(ref["m_ref_dock"]), 1.0e-12)
+        h_mixed = (m_cascade * h_cascade + m_dock * h_dock) / max(m_cascade + m_dock, 1.0e-12)
+
+        t_cascade_k = float(PropsSI("T", "P", ref["p_evap"], "H", h_cascade, self.ref_fluid))
+        t_dock_k = float(PropsSI("T", "P", ref["p_evap"], "H", h_dock, self.ref_fluid))
+        t_mixed_k = float(PropsSI("T", "P", ref["p_evap"], "H", h_mixed, self.ref_fluid))
+        return {
+            "superheat_k": t_mixed_k - tevap_k,
+            "superheat_cascade_k": t_cascade_k - tevap_k,
+            "superheat_dock_k": t_dock_k - tevap_k,
         }
 
     def _evaluate_dock_evaporator(self, dock_c: float, tevap_c: float) -> dict[str, float]:
@@ -835,7 +872,8 @@ class CascadeSystemModel:
         }
 
     def residual(self, unknowns: np.ndarray, prev_state: np.ndarray, time_s: float, dt_s: float) -> np.ndarray:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns
+        m_ref = m_ref_cascade + m_ref_dock
         prev_room_c, prev_sink_c, prev_dock_c = prev_state
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
@@ -859,9 +897,9 @@ class CascadeSystemModel:
             air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
             dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
             q_dock_evap = dock_evap["q_w"]
-            ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock_evap)
+            ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref_cascade, m_ref_dock, air["q_cascade"], q_dock_evap)
         except ValueError:
-            return np.full(9, 1.0e9, dtype=float)
+            return np.full(10, 1.0e9, dtype=float)
 
         t2_c = air["t2_k"] - KELVIN_OFFSET
         reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
@@ -889,7 +927,8 @@ class CascadeSystemModel:
                 air["q_reg_hot"] - q_reg_ua,
                 cascade_balance,
                 ref["q_cond"] - q_cond_ua,
-                m_ref - ref["m_ref_valve"],
+                m_ref_cascade - ref["m_ref_valve_cascade"],
+                m_ref_dock - ref["m_ref_valve_dock"],
                 m_ref - ref["m_ref_compressor"],
             ],
             dtype=float,
@@ -897,7 +936,7 @@ class CascadeSystemModel:
         return res
 
     def steady_state_residual(self, unknowns: np.ndarray, time_s: float) -> np.ndarray:
-        steady_state = np.array([unknowns[0], unknowns[1], unknowns[8]], dtype=float)
+        steady_state = np.array([unknowns[0], unknowns[1], unknowns[9]], dtype=float)
         return self.residual(unknowns, steady_state, time_s, dt_s=1.0)
 
     def startup_balance_residual(self, unknowns: np.ndarray, time_s: float) -> np.ndarray:
@@ -909,7 +948,8 @@ class CascadeSystemModel:
         return metrics
 
     def post_process(self, unknowns: np.ndarray, time_s: float) -> StepResult:
-        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref, dock_c = unknowns
+        room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns
+        m_ref = m_ref_cascade + m_ref_dock
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -922,7 +962,8 @@ class CascadeSystemModel:
         dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
         q_dock = dock_evap["q_w"]
         infiltration = self.infiltration_disturbance_w(time_s)
-        ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref, air["q_cascade"], q_dock)
+        ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref_cascade, m_ref_dock, air["q_cascade"], q_dock)
+        branch_holdup = self._branch_holdup_outputs(ref, tevap_k, time_s)
         air_input_power = (air["w_air_comp"] - air["w_air_turb"]) / max(air_cfg.get("combined_drive_efficiency", 1.0), 1.0e-6)
         dock_fan_power = dock_evap["fan_power_w"]
         q_dock_external = max(q_dock - dock_evap["fan_heat_w"], 0.0)
@@ -1010,9 +1051,12 @@ class CascadeSystemModel:
             "cascade_valve_opening": ref["cascade_valve_opening"],
             "dock_valve_opening": ref["dock_valve_opening"],
             "refrigerant_subcooling_k": ref["subcooling_k"],
-            "refrigerant_superheat_k": ref["superheat_k"],
-            "refrigerant_cascade_superheat_k": ref["superheat_cascade_k"],
-            "refrigerant_dock_superheat_k": ref["superheat_dock_k"],
+            "refrigerant_superheat_k": branch_holdup["superheat_k"],
+            "refrigerant_cascade_superheat_k": branch_holdup["superheat_cascade_k"],
+            "refrigerant_dock_superheat_k": branch_holdup["superheat_dock_k"],
+            "refrigerant_raw_superheat_k": ref["superheat_k"],
+            "refrigerant_raw_cascade_superheat_k": ref["superheat_cascade_k"],
+            "refrigerant_raw_dock_superheat_k": ref["superheat_dock_k"],
             "refrigerant_compressor_work_w": ref["w_ref_comp"],
             "refrigerant_compressor_isentropic_work_w": ref["w_ref_isentropic"],
             "refrigerant_compressor_eta_is_target": ref["eta_is_target"],

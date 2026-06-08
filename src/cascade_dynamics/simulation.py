@@ -30,7 +30,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 17
+STARTUP_CACHE_VERSION = 18
 
 STATE_INDEX = {
     "room_c": 0,
@@ -40,8 +40,9 @@ STATE_INDEX = {
     "t6_c": 4,
     "tevap_c": 5,
     "tcond_c": 6,
-    "m_ref_kg_s": 7,
-    "dock_c": 8,
+    "m_ref_cascade_kg_s": 7,
+    "m_ref_dock_kg_s": 8,
+    "dock_c": 9,
 }
 
 DEFAULT_STARTUP_FREE_PARAMETERS = [
@@ -124,6 +125,8 @@ def _startup_cache_path(config: dict[str, Any]) -> Path:
 
 def initial_vector(config: dict) -> np.ndarray:
     guess = config["initial_guess"]
+    m_ref_total = float(guess["m_ref_kg_s"])
+    m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref_total)
     return np.array(
         [
             guess["room_c"],
@@ -133,18 +136,57 @@ def initial_vector(config: dict) -> np.ndarray:
             guess["t6_c"],
             guess["tevap_c"],
             guess["tcond_c"],
-            guess["m_ref_kg_s"],
+            m_ref_cascade,
+            m_ref_dock,
             guess.get("dock_c", config["boundary_conditions"]["dock_initial_c"]),
         ],
         dtype=float,
     )
 
 
+def _split_refrigerant_mass_flow(config: dict[str, Any], total_m_ref_kg_s: float) -> tuple[float, float]:
+    valves = config.get("vcc_cycle", {}).get("expansion_valves", {})
+    cascade = valves.get("cascade", {})
+    dock = valves.get("dock", {})
+    cascade_weight = float(cascade.get("opening", 0.75)) * float(cascade.get("flow_coefficient_kg_s_pa", 1.0))
+    dock_weight = float(dock.get("opening", 0.25)) * float(dock.get("flow_coefficient_kg_s_pa", 1.0))
+    total_weight = cascade_weight + dock_weight
+    if total_weight <= 0.0:
+        cascade_fraction = 0.75
+    else:
+        cascade_fraction = cascade_weight / total_weight
+    total_m_ref_kg_s = max(float(total_m_ref_kg_s), 2.0e-6)
+    m_ref_cascade = max(total_m_ref_kg_s * cascade_fraction, 1.0e-6)
+    m_ref_dock = max(total_m_ref_kg_s - m_ref_cascade, 1.0e-6)
+    return m_ref_cascade, m_ref_dock
+
+
+def _state_value(unknowns: np.ndarray, key: str) -> float:
+    if key == "m_ref_kg_s":
+        return float(unknowns[STATE_INDEX["m_ref_cascade_kg_s"]] + unknowns[STATE_INDEX["m_ref_dock_kg_s"]])
+    return float(unknowns[STATE_INDEX[key]])
+
+
+def _set_state_value(config: dict[str, Any], unknowns: np.ndarray, key: str, value: float) -> None:
+    if key == "m_ref_kg_s":
+        current_total = _state_value(unknowns, key)
+        if current_total > 0.0:
+            cascade_fraction = float(unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]) / current_total
+        else:
+            cascade, dock = _split_refrigerant_mass_flow(config, float(value))
+            cascade_fraction = cascade / max(cascade + dock, 1.0e-12)
+        value = max(float(value), 2.0e-6)
+        unknowns[STATE_INDEX["m_ref_cascade_kg_s"]] = max(value * cascade_fraction, 1.0e-6)
+        unknowns[STATE_INDEX["m_ref_dock_kg_s"]] = max(value - unknowns[STATE_INDEX["m_ref_cascade_kg_s"]], 1.0e-6)
+        return
+    unknowns[STATE_INDEX[key]] = float(value)
+
+
 def _startup_target_state(config: dict[str, Any], targets: dict[str, float]) -> np.ndarray:
     unknowns = initial_vector(config)
     for key, value in targets.items():
-        if key in STATE_INDEX:
-            unknowns[STATE_INDEX[key]] = float(value)
+        if key in STATE_INDEX or key == "m_ref_kg_s":
+            _set_state_value(config, unknowns, key, float(value))
     return unknowns
 
 
@@ -269,7 +311,7 @@ def _backcalculate_dock_evaporator_design(config: dict[str, Any], unknowns: np.n
     if not dock_cfg.get("startup_backcalculate_ua_w_k", dock_cfg.get("backcalculate_ua_from_startup", True)):
         return
 
-    _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
+    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns
     design_air_m_dot = float(dock_cfg.get("design_air_m_dot_kg_s", dock_cfg.get("air_m_dot_kg_s", 3.5)))
     air_m_dot_min = float(dock_cfg.get("air_m_dot_min_kg_s", 0.0))
     air_m_dot_max = float(dock_cfg.get("air_m_dot_max_kg_s", max(design_air_m_dot, air_m_dot_min)))
@@ -338,7 +380,7 @@ def _solve_air_pressure_ratio_for_t5(
     unknowns: np.ndarray,
     t5_target_c: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
     lower, upper = _free_parameter_bounds(startup_cfg, "air_cycle.pressure_ratio", (1.01, 2.0))
 
     def residual(pressure_ratio: float) -> float:
@@ -363,7 +405,7 @@ def _solve_air_speed_for_mass_flow(
     unknowns: np.ndarray,
     target_m_air_kg_s: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower, upper = _free_parameter_bounds(
         startup_cfg,
@@ -393,7 +435,7 @@ def _solve_air_speed_for_t5(
     unknowns: np.ndarray,
     t5_target_c: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower, upper = _free_parameter_bounds(
         startup_cfg,
@@ -442,7 +484,7 @@ def _solve_air_speed_for_evaporator_capacity(
     unknowns: np.ndarray,
     target_capacity_w: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, tevap_c, _, _, dock_c = unknowns
+    room_c, _, t3_c, t4_c, t6_c, tevap_c, _, _, _, dock_c = unknowns
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower, upper = _free_parameter_bounds(
         startup_cfg,
@@ -539,7 +581,7 @@ def _solve_air_head_for_t5(
     unknowns: np.ndarray,
     t5_target_c: float,
 ) -> tuple[float, dict[str, float], int]:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower = float(flow_cfg["head_min_m"])
     upper = float(flow_cfg["head_max_m"])
@@ -682,7 +724,7 @@ def _initialize_air_damper_for_evaporator_capacity(
     t5_target_c: float,
     target_capacity_w: float,
 ) -> int:
-    _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
+    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
     q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     target_q_cascade_w = float(target_capacity_w) - q_dock
@@ -724,7 +766,7 @@ def _initialize_constant_air_flow_for_evaporator_capacity(
     t5_target_c: float,
     target_capacity_w: float,
 ) -> int:
-    _, _, _, _, _, tevap_c, _, _, dock_c = unknowns
+    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
     q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     target_q_cascade_w = float(target_capacity_w) - q_dock
@@ -790,9 +832,10 @@ def _build_paper_design_unknowns(config: dict[str, Any], startup_cfg: dict[str, 
     t6_c = room_c + regenerator_effectiveness * (t3_c - room_c)
     t5_target_c = float(startup_cfg.get("t5_target_c", room_c - room_delta_t_c))
     m_ref_kg_s = float(config["initial_guess"].get("m_ref_kg_s", 0.1))
+    m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref_kg_s)
 
     return (
-        np.array([room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_kg_s, dock_c], dtype=float),
+        np.array([room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c], dtype=float),
         t5_target_c,
     )
 
@@ -838,7 +881,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         iteration_count += _solve_air_speed_for_mass_flow(config, model, startup_cfg, unknowns, float(target_m_air))
         air_speed_solved = True
 
-    room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, _, dock_c = unknowns
+    room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, _, _, dock_c = unknowns
     air = model._evaluate_air_cycle(room_c + KELVIN_OFFSET, t3_c + KELVIN_OFFSET, t4_c + KELVIN_OFFSET, t6_c + KELVIN_OFFSET)
     q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     q_evap_total = air["q_cascade"] + q_dock
@@ -896,14 +939,18 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         eta_is = float(compressor_cfg.get("eta_is", 1.0))
         h8s = float(PropsSI("H", "P", p_cond, "S", s7_target, ref_fluid))
         compressor_cfg["work_w"] = float(m_ref * (h8s - h7_target) / max(eta_is, 1.0e-6))
-    unknowns[STATE_INDEX["m_ref_kg_s"]] = m_ref
+    m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref)
+    q_total_for_split = max(q_evap_total, 1.0e-9)
+    m_ref_cascade = m_ref * air["q_cascade"] / q_total_for_split
+    m_ref_dock = m_ref * q_dock / q_total_for_split
+    unknowns[STATE_INDEX["m_ref_cascade_kg_s"]] = max(m_ref_cascade, 1.0e-6)
+    unknowns[STATE_INDEX["m_ref_dock_kg_s"]] = max(m_ref_dock, 1.0e-6)
 
     legacy_valve_cfg = dict(vcc_cfg.get("expansion_valve", {}))
     branch_valves = vcc_cfg.setdefault("expansion_valves", {})
-    q_total_for_split = max(q_evap_total, 1.0e-9)
     branch_targets = {
-        "cascade": (air["q_cascade"], m_ref * air["q_cascade"] / q_total_for_split),
-        "dock": (q_dock, m_ref * q_dock / q_total_for_split),
+        "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
+        "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
     }
     for branch, (_, branch_m_ref) in branch_targets.items():
         valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
@@ -914,7 +961,14 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         )
         valve_cfg["opening"] = float(np.clip(valve_opening, valve_cfg.get("opening_min", 0.05), valve_cfg.get("opening_max", 1.0)))
 
-    ref = model._evaluate_refrigerant_cycle(tevap_c + KELVIN_OFFSET, tcond_c + KELVIN_OFFSET, m_ref, air["q_cascade"], q_dock)
+    ref = model._evaluate_refrigerant_cycle(
+        tevap_c + KELVIN_OFFSET,
+        tcond_c + KELVIN_OFFSET,
+        unknowns[STATE_INDEX["m_ref_cascade_kg_s"]],
+        unknowns[STATE_INDEX["m_ref_dock_kg_s"]],
+        air["q_cascade"],
+        q_dock,
+    )
     reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
     cascade_lmtd = positive_lmtd(air["t2_k"] - KELVIN_OFFSET - tevap_c, t3_c - tevap_c)
     condenser_lmtd = positive_lmtd(tcond_c - config["boundary_conditions"]["ambient_c"], tcond_c - sink_c)
@@ -1062,10 +1116,15 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
     x_scale: list[float] = []
 
     for key in free_state_keys:
-        x0.append(float(fixed_unknowns[STATE_INDEX[key]]))
-        lower.append(float(startup_cfg.get("temperature_min_c", -80.0)))
-        upper.append(float(startup_cfg.get("temperature_max_c", 90.0)))
-        x_scale.append(max(abs(x0[-1]), 10.0))
+        x0.append(_state_value(fixed_unknowns, key))
+        if key.startswith("m_ref"):
+            lower.append(float(startup_cfg.get("mass_flow_min_kg_s", 1.0e-6)))
+            upper.append(float(startup_cfg.get("mass_flow_max_kg_s", 5.0)))
+            x_scale.append(max(abs(x0[-1]), 1.0e-3))
+        else:
+            lower.append(float(startup_cfg.get("temperature_min_c", -80.0)))
+            upper.append(float(startup_cfg.get("temperature_max_c", 90.0)))
+            x_scale.append(max(abs(x0[-1]), 10.0))
 
     for item in free_parameters:
         value = _free_parameter_initial_value(config, item)
@@ -1079,7 +1138,7 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
         offset = 0
         mirror_room_load = config["boundary_conditions"].get("load_after_w") == config["boundary_conditions"].get("load_before_w")
         for key in free_state_keys:
-            unknowns[STATE_INDEX[key]] = x[offset]
+            _set_state_value(config, unknowns, key, x[offset])
             offset += 1
         for item in free_parameters:
             set_path(config, item["path"], x[offset])
@@ -1093,7 +1152,7 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
         balance = model.startup_balance_residual(unknowns, time_s)
         scaled = []
         for idx, value in enumerate(balance):
-            scale = scales["kg_s"] if idx >= len(balance) - 2 else scales["w"]
+            scale = scales["kg_s"] if idx >= len(balance) - 3 else scales["w"]
             scaled.append(value / scale)
         return np.asarray(scaled, dtype=float)
 
@@ -1182,6 +1241,66 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
 
 
 def solve_dynamic_step(residual_fn, x0: np.ndarray, sim_cfg: dict[str, Any]) -> tuple[np.ndarray, int]:
+    residual0 = np.asarray(residual_fn(np.asarray(x0, dtype=float)), dtype=float)
+    if residual0.size == 10:
+        residual_scales = np.ones_like(residual0)
+        residual_scales[3:7] = float(sim_cfg.get("fallback_power_residual_scale_w", 1.0e5))
+        residual_scales[7:10] = float(sim_cfg.get("fallback_mass_flow_residual_scale_kg_s", 0.1))
+
+        def scaled_residual_fn(x: np.ndarray) -> np.ndarray:
+            return np.asarray(residual_fn(x), dtype=float) / residual_scales
+
+        lower = np.array([-83.15, -3.15, -100.0, -100.0, -100.0, -73.15, 0.0, 1.0e-6, 1.0e-6, -50.0], dtype=float)
+        upper = np.array([46.85, 86.85, 120.0, 120.0, 120.0, 46.85, 90.0, 5.0, 5.0, 46.85], dtype=float)
+        x0_bounded = np.clip(np.asarray(x0, dtype=float), lower, upper)
+        step_scales = np.array([10.0, 10.0, 10.0, 10.0, 10.0, 5.0, 10.0, 0.01, 0.01, 10.0], dtype=float)
+        x = x0_bounded.copy()
+        for iteration in range(1, int(sim_cfg.get("newton_max_iter", 100)) + 1):
+            residual = scaled_residual_fn(x)
+            residual_norm = float(np.linalg.norm(residual, ord=np.inf))
+            if residual_norm < float(sim_cfg["newton_tol"]):
+                return x, iteration
+            jac = np.zeros((residual.size, x.size), dtype=float)
+            fd_step = float(sim_cfg["fd_step"])
+            for col in range(x.size):
+                dx = np.zeros_like(x)
+                dx[col] = fd_step * max(abs(x[col]), step_scales[col])
+                x_plus = np.clip(x + dx, lower, upper)
+                actual_dx = x_plus[col] - x[col]
+                if abs(actual_dx) <= 1.0e-14:
+                    x_minus = np.clip(x - dx, lower, upper)
+                    actual_dx = x[col] - x_minus[col]
+                    jac[:, col] = (residual - scaled_residual_fn(x_minus)) / max(actual_dx, 1.0e-14)
+                else:
+                    jac[:, col] = (scaled_residual_fn(x_plus) - residual) / actual_dx
+            try:
+                delta = np.linalg.solve(jac, -residual)
+            except np.linalg.LinAlgError:
+                delta, *_ = np.linalg.lstsq(jac, -residual, rcond=None)
+            damping = 1.0
+            while damping > 1.0e-4:
+                trial = np.clip(x + damping * delta, lower, upper)
+                trial_residual = scaled_residual_fn(trial)
+                if float(np.linalg.norm(trial_residual, ord=np.inf)) < residual_norm:
+                    x = trial
+                    break
+                damping *= 0.5
+            else:
+                break
+
+        result = least_squares(
+            scaled_residual_fn,
+            x0_bounded,
+            bounds=(lower, upper),
+            x_scale=np.maximum(np.abs(x0_bounded), step_scales),
+            ftol=sim_cfg.get("fallback_least_squares_tol", sim_cfg["newton_tol"]),
+            xtol=sim_cfg.get("fallback_least_squares_tol", sim_cfg["newton_tol"]),
+            gtol=sim_cfg.get("fallback_least_squares_tol", sim_cfg["newton_tol"]),
+            max_nfev=sim_cfg.get("fallback_max_function_evals", 500),
+        )
+        if result.success:
+            return np.asarray(result.x, dtype=float), int(result.nfev)
+
     try:
         return newton_raphson_fd(
             residual_fn,
@@ -1192,11 +1311,10 @@ def solve_dynamic_step(residual_fn, x0: np.ndarray, sim_cfg: dict[str, Any]) -> 
             jacobian_scheme=sim_cfg.get("jacobian_scheme", "central"),
         )
     except NewtonSolveError:
-        residual0 = np.asarray(residual_fn(np.asarray(x0, dtype=float)), dtype=float)
         residual_scales = np.ones_like(residual0)
-        if residual0.size == 9:
+        if residual0.size == 10:
             residual_scales[3:7] = float(sim_cfg.get("fallback_power_residual_scale_w", 1.0e5))
-            residual_scales[7:9] = float(sim_cfg.get("fallback_mass_flow_residual_scale_kg_s", 0.1))
+            residual_scales[7:10] = float(sim_cfg.get("fallback_mass_flow_residual_scale_kg_s", 0.1))
 
         def scaled_residual_fn(x: np.ndarray) -> np.ndarray:
             return np.asarray(residual_fn(x), dtype=float) / residual_scales
@@ -1254,9 +1372,9 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
                 controller["bias"] = float(startup_snapshot[solved_bias_key])
 
     configure_disturbances(plant_config)
-    model.reset_infiltration_disturbance(float(unknowns[0]), float(unknowns[8]))
+    model.reset_infiltration_disturbance(float(unknowns[0]), float(unknowns[9]))
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
-    state = np.array([unknowns[0], unknowns[1], unknowns[8]], dtype=float)
+    state = np.array([unknowns[0], unknowns[1], unknowns[9]], dtype=float)
     history: list[dict[str, float]] = []
 
     _log(f"[run] steps={len(times) - 1} dt={dt_s:.1f}s interval={progress_interval}")
