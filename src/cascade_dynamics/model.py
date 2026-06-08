@@ -633,6 +633,7 @@ class CascadeSystemModel:
         opening = float(valve_cfg.get("opening", 0.0))
         return coefficient * opening * max(p_cond - p_evap, 0.0)
 
+<<<<<<< HEAD
     def _evaluate_refrigerant_cycle(
         self,
         tevap_k: float,
@@ -642,6 +643,9 @@ class CascadeSystemModel:
         q_cascade: float,
         q_dock: float,
     ) -> dict[str, float]:
+=======
+    def _evaluate_refrigerant_cycle(self, tevap_k: float, tcond_k: float, m_ref: float, q_cascade: float, q_dock: float) -> dict[str, float]:
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
         vcc_cfg = self.cfg["vcc_cycle"]
         p_evap = p_sat(tevap_k, self.ref_fluid)
         p_cond_from_tcond = p_sat(tcond_k, self.ref_fluid)
@@ -682,6 +686,7 @@ class CascadeSystemModel:
         has_branch_valves = bool(vcc_cfg.get("expansion_valves"))
 
         p_cond_for_valves = p_cond
+<<<<<<< HEAD
         h_cascade_out = h10 + q_cascade_branch / max(m_ref_cascade, 1.0e-9)
         h_dock_out = h10 + q_dock_branch / max(m_ref_dock, 1.0e-9)
         h7 = (m_ref_cascade * h_cascade_out + m_ref_dock * h_dock_out) / max(m_ref, 1.0e-9)
@@ -692,6 +697,30 @@ class CascadeSystemModel:
 
         if has_branch_valves:
             for _ in range(3):
+=======
+        h7 = h10 + evap_total / max(m_ref, 1.0e-6)
+        t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
+        s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
+        h_cascade_out = h7
+        h_dock_out = h7
+        t_cascade_out_k = t7_k
+        t_dock_out_k = t7_k
+        m_ref_cascade = m_ref
+        m_ref_dock = 0.0
+
+        if has_branch_valves:
+            for _ in range(3):
+                m_cascade_nominal = self._branch_valve_flow(cascade_valve_cfg, p_cond_for_valves, p_evap)
+                m_dock_nominal = self._branch_valve_flow(dock_valve_cfg, p_cond_for_valves, p_evap)
+                m_nominal_total = max(m_cascade_nominal + m_dock_nominal, 1.0e-12)
+                m_ref_cascade = m_ref * m_cascade_nominal / m_nominal_total
+                m_ref_dock = m_ref * m_dock_nominal / m_nominal_total
+                h_cascade_out = h10 + q_cascade_branch / max(m_ref_cascade, 1.0e-9)
+                h_dock_out = h10 + q_dock_branch / max(m_ref_dock, 1.0e-9)
+                h7 = (m_ref_cascade * h_cascade_out + m_ref_dock * h_dock_out) / max(m_ref, 1.0e-9)
+                t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
+                s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
                 if compressor_cfg.get("model", "simple_isentropic") == "bitzer_variable_speed_map" and compressor_uses_map_power_pressure_lift(compressor_cfg):
                     p_cond_for_valves = compressor_discharge_pressure_from_power(
                         p_evap,
@@ -705,6 +734,11 @@ class CascadeSystemModel:
                         pressure_ratio_max=compressor_cfg.get("pressure_ratio_max"),
                     )
             p_cond = p_cond_for_valves
+<<<<<<< HEAD
+=======
+            t_cascade_out_k = float(PropsSI("T", "P", p_evap, "H", h_cascade_out, self.ref_fluid))
+            t_dock_out_k = float(PropsSI("T", "P", p_evap, "H", h_dock_out, self.ref_fluid))
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
 
         superheat_k = t7_k - tevap_k
         superheat_cascade_k = t_cascade_out_k - tevap_k
@@ -774,12 +808,16 @@ class CascadeSystemModel:
             "m_ref_valve_dock": m_ref_valve_dock,
             "m_ref_cascade": m_ref_cascade,
             "m_ref_dock": m_ref_dock,
+<<<<<<< HEAD
             "m_ref_total": m_ref,
+=======
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
             "m_ref_compressor": m_ref_compressor,
             "compressor_speed_rpm": compressor_speed_rpm,
             "compressor_map_q_w": compressor_map_q_w,
             "cascade_valve_opening": float(cascade_valve_cfg.get("opening", 0.0)),
             "dock_valve_opening": float(dock_valve_cfg.get("opening", 0.0)),
+<<<<<<< HEAD
         }
 
     def _branch_holdup_outputs(self, ref: dict[str, float], tevap_k: float, time_s: float) -> dict[str, float]:
@@ -812,6 +850,8 @@ class CascadeSystemModel:
             "superheat_k": t_mixed_k - tevap_k,
             "superheat_cascade_k": t_cascade_k - tevap_k,
             "superheat_dock_k": t_dock_k - tevap_k,
+=======
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
         }
 
     def _evaluate_dock_evaporator(self, dock_c: float, tevap_c: float) -> dict[str, float]:
@@ -1051,12 +1091,18 @@ class CascadeSystemModel:
             "cascade_valve_opening": ref["cascade_valve_opening"],
             "dock_valve_opening": ref["dock_valve_opening"],
             "refrigerant_subcooling_k": ref["subcooling_k"],
+<<<<<<< HEAD
             "refrigerant_superheat_k": branch_holdup["superheat_k"],
             "refrigerant_cascade_superheat_k": branch_holdup["superheat_cascade_k"],
             "refrigerant_dock_superheat_k": branch_holdup["superheat_dock_k"],
             "refrigerant_raw_superheat_k": ref["superheat_k"],
             "refrigerant_raw_cascade_superheat_k": ref["superheat_cascade_k"],
             "refrigerant_raw_dock_superheat_k": ref["superheat_dock_k"],
+=======
+            "refrigerant_superheat_k": ref["superheat_k"],
+            "refrigerant_cascade_superheat_k": ref["superheat_cascade_k"],
+            "refrigerant_dock_superheat_k": ref["superheat_dock_k"],
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
             "refrigerant_compressor_work_w": ref["w_ref_comp"],
             "refrigerant_compressor_isentropic_work_w": ref["w_ref_isentropic"],
             "refrigerant_compressor_eta_is_target": ref["eta_is_target"],

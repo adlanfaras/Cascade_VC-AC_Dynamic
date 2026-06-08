@@ -30,7 +30,11 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
+<<<<<<< HEAD
 STARTUP_CACHE_VERSION = 18
+=======
+STARTUP_CACHE_VERSION = 17
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
 
 STATE_INDEX = {
     "room_c": 0,
@@ -948,9 +952,16 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
 
     legacy_valve_cfg = dict(vcc_cfg.get("expansion_valve", {}))
     branch_valves = vcc_cfg.setdefault("expansion_valves", {})
+<<<<<<< HEAD
     branch_targets = {
         "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
         "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
+=======
+    q_total_for_split = max(q_evap_total, 1.0e-9)
+    branch_targets = {
+        "cascade": (air["q_cascade"], m_ref * air["q_cascade"] / q_total_for_split),
+        "dock": (q_dock, m_ref * q_dock / q_total_for_split),
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
     }
     for branch, (_, branch_m_ref) in branch_targets.items():
         valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))

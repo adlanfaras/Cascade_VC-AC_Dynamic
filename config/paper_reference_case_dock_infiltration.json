@@ -146,9 +146,12 @@
     },
     "condenser_ua_w_k": 18000.0,
     "subcooling_k": 0.0,
+<<<<<<< HEAD
     "branch_holdup": {
       "outlet_enthalpy_time_constant_s": 5.0
     },
+=======
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
     "expansion_valves": {
       "cascade": {
         "opening": 0.375,
@@ -229,11 +232,17 @@
         "anti_windup": true
       },
       {
-        "name": "B2_air_after_cascade_to_nh3_compressor_speed",
+        "name": "B2_tevap_to_nh3_compressor_speed",
         "enabled": true,
+<<<<<<< HEAD
         "measurement": "t3_c",
         "setpoint": -15.0,
         "setpoint_from_startup": "t3_c",
+=======
+        "measurement": "tevap_c",
+        "setpoint": -5.0,
+        "setpoint_from_startup": "tevap_c",
+>>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
         "actuator_path": "vcc_cycle.compressor.speed_rpm",
         "action": "direct",
         "bias": 1533.0,
