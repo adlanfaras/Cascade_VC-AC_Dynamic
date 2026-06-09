@@ -72,6 +72,12 @@ def main() -> None:
     parser.add_argument("--parallel", action="store_true", help="Run multiple requested cases in parallel processes.")
     parser.add_argument("--workers", type=int, default=None, help="Number of worker processes for --parallel.")
     parser.add_argument(
+        "--jacobian-workers",
+        type=int,
+        default=None,
+        help="Thread workers per simulation for finite-difference Jacobian evaluations.",
+    )
+    parser.add_argument(
         "--run-version",
         help="Append a stable version tag to output files, e.g. 2 creates *_2.csv and rerunning 2 overwrites it.",
     )
@@ -80,6 +86,8 @@ def main() -> None:
     door_durations = _door_durations_from_args(args)
     if door_durations is None:
         cfg = load_config(args.config)
+        if args.jacobian_workers is not None:
+            cfg["simulation"]["jacobian_workers"] = max(1, args.jacobian_workers)
         apply_output_version(cfg, args.run_version)
         history = run_simulation(cfg)
         save_plot(history, cfg["output"]["plot_file"])
@@ -88,7 +96,7 @@ def main() -> None:
         return
 
     if len(door_durations) == 1:
-        result = run_case_from_config_path(args.config, door_durations[0], args.run_version)
+        result = run_case_from_config_path(args.config, door_durations[0], args.run_version, args.jacobian_workers)
         _print_case_result(result)
         return
 
@@ -99,7 +107,13 @@ def main() -> None:
         workers = args.workers
 
     print(f"Running {len(door_durations)} door-duration cases with workers={workers}")
-    results = run_cases(args.config, list(door_durations), workers=workers, run_version=args.run_version)
+    results = run_cases(
+        args.config,
+        list(door_durations),
+        workers=workers,
+        run_version=args.run_version,
+        jacobian_workers=args.jacobian_workers,
+    )
     for result in results:
         _print_case_result(result)
 

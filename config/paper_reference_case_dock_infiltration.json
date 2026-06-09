@@ -118,12 +118,17 @@
   },
   "vcc_cycle": {
     "compressor": {
-      "model": "bitzer_variable_speed_map",
+      "model": "positive_displacement_clearance",
       "eta_is": 0.85,
-      "fit_eta_is_from_startup": true,
+      "fit_eta_is_from_startup": false,
       "eta_is_min": 0.4,
       "eta_is_max": 0.95,
-      "pressure_lift_model": "map_power_backcalculate",
+      "clearance_factor": 0.05,
+      "polytropic_exponent": 1.25,
+      "eta_v_min": 0.3,
+      "eta_v_max": 1.0,
+      "startup_backcalculate_displacement": true,
+      "displacement_m3_per_rev": 0.0,
       "pressure_ratio_min": 1.000001,
       "pressure_ratio_max": 20.0,
       "speed_rpm": 1533.0,
@@ -146,12 +151,9 @@
     },
     "condenser_ua_w_k": 18000.0,
     "subcooling_k": 0.0,
-<<<<<<< HEAD
     "branch_holdup": {
       "outlet_enthalpy_time_constant_s": 5.0
     },
-=======
->>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
     "expansion_valves": {
       "cascade": {
         "opening": 0.375,
@@ -218,9 +220,9 @@
       {
         "name": "B1_air_before_room_to_air_compressor_speed",
         "enabled": true,
-        "measurement": "t5_c",
+        "measurement": "room_c",
         "setpoint": -30.0,
-        "setpoint_from_startup": "t5_c",
+        "setpoint_from_startup": "room_c",
         "actuator_path": "air_cycle.compressor_mass_flow.speed_rpm",
         "action": "direct",
         "bias": 15000.0,
@@ -232,17 +234,11 @@
         "anti_windup": true
       },
       {
-        "name": "B2_tevap_to_nh3_compressor_speed",
+        "name": "B2_air_after_cascade_to_nh3_compressor_speed",
         "enabled": true,
-<<<<<<< HEAD
         "measurement": "t3_c",
         "setpoint": -15.0,
         "setpoint_from_startup": "t3_c",
-=======
-        "measurement": "tevap_c",
-        "setpoint": -5.0,
-        "setpoint_from_startup": "tevap_c",
->>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
         "actuator_path": "vcc_cycle.compressor.speed_rpm",
         "action": "direct",
         "bias": 1533.0,

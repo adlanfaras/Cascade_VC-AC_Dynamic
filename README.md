@@ -70,6 +70,14 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case.json --
 python -m src.cascade_dynamics.main --config config/paper_reference_case_dock_infiltration.json --door-open-durations 30 60 120 --parallel --workers 3
 ```
 
+With only three door-duration cases, the outer batch can only keep three processes busy. You can also experiment with parallel finite-difference Jacobian work inside each simulation:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/paper_reference_case.json --door-open-durations 30 60 120 --parallel --workers 3 --jacobian-workers 3
+```
+
+Benchmark `--jacobian-workers 2`, `3`, or `4` before using it for production runs. Very high values can be slower because each timestep solves a small 10-variable system.
+
 ## Versioned Outputs
 
 Add a stable version tag to output filenames:

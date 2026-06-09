@@ -121,9 +121,12 @@ def run_case_from_config_path(
     config_path: str | Path,
     door_open_duration_s: float | None = None,
     run_version: str | int | None = None,
+    jacobian_workers: int | None = None,
 ) -> CaseResult:
     base_config = load_config(config_path)
     name, config = build_case_config(base_config, door_open_duration_s, run_version)
+    if jacobian_workers is not None:
+        config["simulation"]["jacobian_workers"] = max(1, int(jacobian_workers))
     return run_case(config, name, door_open_duration_s)
 
 
@@ -133,14 +136,18 @@ def run_cases(
     *,
     workers: int = 1,
     run_version: str | int | None = None,
+    jacobian_workers: int | None = None,
 ) -> list[CaseResult]:
     if workers <= 1 or len(door_open_durations_s) <= 1:
-        return [run_case_from_config_path(config_path, duration, run_version) for duration in door_open_durations_s]
+        return [
+            run_case_from_config_path(config_path, duration, run_version, jacobian_workers)
+            for duration in door_open_durations_s
+        ]
 
     results: list[CaseResult] = []
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(run_case_from_config_path, config_path, duration, run_version): duration
+            executor.submit(run_case_from_config_path, config_path, duration, run_version, jacobian_workers): duration
             for duration in door_open_durations_s
         }
         for future in as_completed(futures):

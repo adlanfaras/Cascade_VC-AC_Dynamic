@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 import csv
@@ -24,17 +25,15 @@ from .model import (
     CascadeSystemModel,
     compressor_discharge_pressure_from_power,
     compressor_eta_is_from_map_power,
+    compressor_mass_flow_positive_displacement,
     compressor_uses_map_power_pressure_lift,
+    compressor_volumetric_efficiency_clearance,
 )
 from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-<<<<<<< HEAD
 STARTUP_CACHE_VERSION = 18
-=======
-STARTUP_CACHE_VERSION = 17
->>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
 
 STATE_INDEX = {
     "room_c": 0,
@@ -73,6 +72,7 @@ PAPER_DESIGN_SOLVED_PATHS = [
     "vcc_cycle.condenser_ua_w_k",
     "vcc_cycle.compressor.speed_rpm",
     "vcc_cycle.compressor.eta_is",
+    "vcc_cycle.compressor.displacement_m3_per_rev",
     "vcc_cycle.expansion_valves.cascade.opening",
     "vcc_cycle.expansion_valves.dock.opening",
     "boundary_conditions.load_before_w",
@@ -902,7 +902,8 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
     m_ref = q_evap_total / max(h7_target - h9, 1.0e-9)
 
     compressor_cfg = vcc_cfg["compressor"]
-    if compressor_cfg.get("model", "simple_isentropic") == "bitzer_variable_speed_map":
+    compressor_model = compressor_cfg.get("model", "simple_isentropic")
+    if compressor_model == "bitzer_variable_speed_map":
         if fixed_vcc_speed_rpm is None:
             iteration_count += _solve_vcc_speed_for_map_capacity(config, startup_cfg, tevap_c, tcond_c, q_evap_total)
             vcc_speed_solved = True
@@ -939,6 +940,27 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
                 pressure_ratio_min=float(compressor_cfg.get("pressure_ratio_min", 1.000001)),
                 pressure_ratio_max=compressor_cfg.get("pressure_ratio_max"),
             )
+    elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
+        if fixed_vcc_speed_rpm is not None:
+            compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
+        pressure_ratio = p_cond / max(p_evap, 1.0e-9)
+        suction_density = float(PropsSI("D", "P", p_evap, "H", h7_target, ref_fluid))
+        eta_v = compressor_volumetric_efficiency_clearance(
+            pressure_ratio,
+            float(compressor_cfg.get("clearance_factor", 0.05)),
+            float(compressor_cfg.get("polytropic_exponent", 1.25)),
+            float(compressor_cfg.get("eta_v_min", 0.3)),
+            float(compressor_cfg.get("eta_v_max", 1.0)),
+        )
+        if compressor_cfg.get("startup_backcalculate_displacement", compressor_cfg.get("backcalculate_displacement_from_startup", True)):
+            speed_rps = max(float(compressor_cfg.get("speed_rpm", 0.0)) / 60.0, 1.0e-12)
+            compressor_cfg["displacement_m3_per_rev"] = m_ref / max(suction_density * speed_rps * eta_v, 1.0e-12)
+        m_ref = compressor_mass_flow_positive_displacement(
+            suction_density,
+            float(compressor_cfg.get("speed_rpm", 0.0)),
+            float(compressor_cfg["displacement_m3_per_rev"]),
+            eta_v,
+        )
     else:
         eta_is = float(compressor_cfg.get("eta_is", 1.0))
         h8s = float(PropsSI("H", "P", p_cond, "S", s7_target, ref_fluid))
@@ -952,16 +974,9 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
 
     legacy_valve_cfg = dict(vcc_cfg.get("expansion_valve", {}))
     branch_valves = vcc_cfg.setdefault("expansion_valves", {})
-<<<<<<< HEAD
     branch_targets = {
         "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
         "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
-=======
-    q_total_for_split = max(q_evap_total, 1.0e-9)
-    branch_targets = {
-        "cascade": (air["q_cascade"], m_ref * air["q_cascade"] / q_total_for_split),
-        "dock": (q_dock, m_ref * q_dock / q_total_for_split),
->>>>>>> 401a039d903dfe16155c168feb15fde8a6125d29
     }
     for branch, (_, branch_m_ref) in branch_targets.items():
         valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
@@ -1251,7 +1266,12 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
     return result
 
 
-def solve_dynamic_step(residual_fn, x0: np.ndarray, sim_cfg: dict[str, Any]) -> tuple[np.ndarray, int]:
+def solve_dynamic_step(
+    residual_fn,
+    x0: np.ndarray,
+    sim_cfg: dict[str, Any],
+    jacobian_executor: ThreadPoolExecutor | None = None,
+) -> tuple[np.ndarray, int]:
     residual0 = np.asarray(residual_fn(np.asarray(x0, dtype=float)), dtype=float)
     if residual0.size == 10:
         residual_scales = np.ones_like(residual0)
@@ -1273,7 +1293,7 @@ def solve_dynamic_step(residual_fn, x0: np.ndarray, sim_cfg: dict[str, Any]) -> 
                 return x, iteration
             jac = np.zeros((residual.size, x.size), dtype=float)
             fd_step = float(sim_cfg["fd_step"])
-            for col in range(x.size):
+            def evaluate_jacobian_column(col: int) -> np.ndarray:
                 dx = np.zeros_like(x)
                 dx[col] = fd_step * max(abs(x[col]), step_scales[col])
                 x_plus = np.clip(x + dx, lower, upper)
@@ -1281,9 +1301,15 @@ def solve_dynamic_step(residual_fn, x0: np.ndarray, sim_cfg: dict[str, Any]) -> 
                 if abs(actual_dx) <= 1.0e-14:
                     x_minus = np.clip(x - dx, lower, upper)
                     actual_dx = x[col] - x_minus[col]
-                    jac[:, col] = (residual - scaled_residual_fn(x_minus)) / max(actual_dx, 1.0e-14)
-                else:
-                    jac[:, col] = (scaled_residual_fn(x_plus) - residual) / actual_dx
+                    return (residual - scaled_residual_fn(x_minus)) / max(actual_dx, 1.0e-14)
+                return (scaled_residual_fn(x_plus) - residual) / actual_dx
+
+            if jacobian_executor is None:
+                for col in range(x.size):
+                    jac[:, col] = evaluate_jacobian_column(col)
+            else:
+                for col, column in enumerate(jacobian_executor.map(evaluate_jacobian_column, range(x.size))):
+                    jac[:, col] = column
             try:
                 delta = np.linalg.solve(jac, -residual)
             except np.linalg.LinAlgError:
@@ -1387,46 +1413,52 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
     state = np.array([unknowns[0], unknowns[1], unknowns[9]], dtype=float)
     history: list[dict[str, float]] = []
+    jacobian_workers = max(1, int(sim_cfg.get("jacobian_workers", 1)))
 
     _log(f"[run] steps={len(times) - 1} dt={dt_s:.1f}s interval={progress_interval}")
-    for idx, time_s in enumerate(times):
-        if idx == 0:
+    jacobian_executor = ThreadPoolExecutor(max_workers=jacobian_workers) if jacobian_workers > 1 else None
+    try:
+        for idx, time_s in enumerate(times):
+            if idx == 0:
+                step = model.post_process(unknowns, time_s)
+                step.values["startup_initialization_enabled"] = float(startup_enabled)
+                step.values["startup_iterations"] = float(startup_iters)
+                step.values["startup_newton_iterations"] = float(startup_iters)
+                step.values["startup_cost"] = startup_cost
+                for key, value in startup_snapshot.items():
+                    if key.startswith("startup_solved_"):
+                        step.values[key] = value
+                step.values["newton_iterations"] = 0.0
+                history.append(step.values)
+                _log(
+                    f"[startup] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
+                    f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
+                    f"COP={step.values['cop_system']:.3f}"
+                )
+                continue
+
+            prev_state = state.copy()
+            model.advance_infiltration_disturbance(time_s, dt_s, history[-1])
+            controller_outputs = control.update(history[-1], plant_config, dt_s)
+
+            def residual_fn(x: np.ndarray) -> np.ndarray:
+                return model.residual(x, prev_state, time_s, dt_s)
+
+            unknowns, iters = solve_dynamic_step(residual_fn, unknowns, sim_cfg, jacobian_executor)
             step = model.post_process(unknowns, time_s)
-            step.values["startup_initialization_enabled"] = float(startup_enabled)
-            step.values["startup_iterations"] = float(startup_iters)
-            step.values["startup_newton_iterations"] = float(startup_iters)
-            step.values["startup_cost"] = startup_cost
-            for key, value in startup_snapshot.items():
-                if key.startswith("startup_solved_"):
-                    step.values[key] = value
-            step.values["newton_iterations"] = 0.0
+            step.values["newton_iterations"] = float(iters)
+            step.values.update(controller_outputs)
             history.append(step.values)
-            _log(
-                f"[startup] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
-                f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
-                f"COP={step.values['cop_system']:.3f}"
-            )
-            continue
-
-        prev_state = state.copy()
-        model.advance_infiltration_disturbance(time_s, dt_s, history[-1])
-        controller_outputs = control.update(history[-1], plant_config, dt_s)
-
-        def residual_fn(x: np.ndarray) -> np.ndarray:
-            return model.residual(x, prev_state, time_s, dt_s)
-
-        unknowns, iters = solve_dynamic_step(residual_fn, unknowns, sim_cfg)
-        step = model.post_process(unknowns, time_s)
-        step.values["newton_iterations"] = float(iters)
-        step.values.update(controller_outputs)
-        history.append(step.values)
-        state = step.state_vector
-        if idx % max(progress_interval, 1) == 0 or idx == len(times) - 1:
-            _log(
-                f"[run] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
-                f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
-                f"COP={step.values['cop_system']:.3f} | newton={iters}"
-            )
+            state = step.state_vector
+            if idx % max(progress_interval, 1) == 0 or idx == len(times) - 1:
+                _log(
+                    f"[run] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
+                    f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
+                    f"COP={step.values['cop_system']:.3f} | newton={iters}"
+                )
+    finally:
+        if jacobian_executor is not None:
+            jacobian_executor.shutdown()
 
     return history
 
