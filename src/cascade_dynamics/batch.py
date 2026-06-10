@@ -35,6 +35,10 @@ def _with_suffix(path: str | Path, suffix: str) -> str:
     return str(out_path.with_name(f"{out_path.stem}_{suffix}{out_path.suffix}"))
 
 
+def _door_start_time_s(node: dict[str, Any], fallback_s: float) -> float:
+    return float(node.get("t_open_s", node.get("start_time_s", fallback_s)))
+
+
 def _format_version_tag(run_version: str | int | None) -> str | None:
     if run_version is None:
         return None
@@ -67,9 +71,25 @@ def apply_door_open_duration(config: dict[str, Any], duration_s: float) -> None:
 
     if events:
         for event in events:
-            t_open = float(event.get("t_open_s", infiltration_cfg.get("t_open_s", 0.0)))
-            event["t_open_s"] = t_open
-            event["t_close_s"] = t_open + duration
+            fallback_s = _door_start_time_s(infiltration_cfg, 0.0)
+            t_open = _door_start_time_s(event, fallback_s)
+            if "start_time_s" in event and "t_open_s" not in event:
+                event["start_time_s"] = t_open
+                event["open_duration_s"] = duration
+            else:
+                event["t_open_s"] = t_open
+                event["t_close_s"] = t_open + duration
+        return
+
+    if isinstance(schedule, dict):
+        fallback_s = _door_start_time_s(infiltration_cfg, 0.0)
+        t_open = _door_start_time_s(schedule, fallback_s)
+        if "t_open_s" in schedule or "t_close_s" in schedule:
+            schedule["t_open_s"] = t_open
+            schedule["t_close_s"] = t_open + duration
+        else:
+            schedule["start_time_s"] = t_open
+            schedule["open_duration_s"] = duration
         return
 
     t_open = float(infiltration_cfg.get("t_open_s", infiltration_cfg.get("start_time_s", 0.0)))

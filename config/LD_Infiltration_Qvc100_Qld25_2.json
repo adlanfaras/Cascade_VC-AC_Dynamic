@@ -1,7 +1,7 @@
 {
   "simulation": {
     "t_start_s": 0.0,
-    "t_end_s": 1200.0,
+    "t_end_s": 5400.0,
     "dt_s": 1.0,
     "newton_tol": 1e-05,
     "newton_max_iter": 100,
@@ -187,16 +187,13 @@
       "model": "tian_unsteady",
       "schedule": {
         "start_time_s": 5.0,
-        "ramp_time_s": 5.0,
-        "open_duration_s": 60.0,
+        "ramp_time_s": 2.0,
+        "open_duration_s": 12.0,
+        "opening_fraction": 1.0,
         "interval_s": 3600.0,
-        "repeat_count": 1,
-        "opening_fraction": 1.0
+        "repeat_count": 1
       },
-      "indoor_source": "dock",
       "outdoor_source": "ambient",
-      "load_application": "dock_only",
-      "indoor_relative_humidity": 0.65,
       "outdoor_relative_humidity": 0.65,
       "effectiveness": 0.96,
       "door": {
@@ -217,7 +214,10 @@
       "xi_sum": 4.0,
       "effective_length_model": "tian_empirical",
       "effective_nozzle_constant": 0.1,
-      "integration_max_step_s": 0.05
+      "integration_max_step_s": 0.05,
+      "indoor_source": "dock",
+      "load_application": "dock_only",
+      "indoor_relative_humidity": 0.65
     }
   },
   "control": {
@@ -243,7 +243,7 @@
         "name": "B2_air_after_cascade_to_nh3_compressor_speed",
         "enabled": true,
         "measurement": "t3_c",
-        "setpoint": -15.0,
+        "setpoint": 4.0,
         "setpoint_from_startup": "t3_c",
         "actuator_path": "vcc_cycle.compressor.speed_rpm",
         "action": "direct",
@@ -331,7 +331,7 @@
     "dock_c": 5.0
   },
   "output": {
-    "plot_file": "outputs/paper_reference_case_dock_infiltration.png",
-    "csv_file": "outputs/paper_reference_case_dock_infiltration.csv"
+    "plot_file": "outputs/LD_Infiltration_Qvc100_Qld25_2.png",
+    "csv_file": "outputs/LD_Infiltration_Qvc100_Qld25_2.csv"
   }
 }

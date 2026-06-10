@@ -1,7 +1,7 @@
 {
   "simulation": {
     "t_start_s": 0.0,
-    "t_end_s": 1200.0,
+    "t_end_s": 6000.0,
     "dt_s": 1.0,
     "newton_tol": 1e-05,
     "newton_max_iter": 100,
@@ -96,16 +96,16 @@
     "compressor_eta_is": 0.85,
     "turbine_eta_is": 0.85,
     "combined_drive_efficiency": 0.9,
-    "regenerator_ua_w_k": 27467.429052096,
+    "regenerator_ua_w_k": 41292.48518286296,
     "humid_air": {
       "room_relative_humidity": 1.0
     },
     "compressor_mass_flow": {
       "model": "polynomial_volumetric_flow_head_speed_constant_mass_flow",
-      "speed_rpm": 15000.0,
+      "speed_rpm": 15860.402960526317,
       "design_speed_rpm": 15000.0,
       "speed_scale_rpm": 5000.0,
-      "fixed_m_dot_kg_s": 3.35013,
+      "fixed_m_dot_kg_s": 4.564652377983593,
       "head_min_m": 642.22,
       "head_max_m": 3000.0,
       "pressure_ratio_min": 1.01,
@@ -128,7 +128,7 @@
       "eta_v_min": 0.3,
       "eta_v_max": 1.0,
       "startup_backcalculate_displacement": true,
-      "displacement_m3_per_rev": 0.0,
+      "displacement_m3_per_rev": 0.0014959080323721466,
       "pressure_ratio_min": 1.000001,
       "pressure_ratio_max": 20.0,
       "speed_rpm": 1533.0,
@@ -136,7 +136,7 @@
       "speed_max_rpm": 1610.0,
       "check_range": false
     },
-    "cascade_ua_w_k": 4216.325690412,
+    "cascade_ua_w_k": 4897.918598498792,
     "dock_evaporator": {
       "model": "ua_lmtd_air",
       "startup_backcalculate_ua_w_k": true,
@@ -147,20 +147,24 @@
       "air_cp_j_kg_k": 1005.0,
       "fan_power_ref_w": 0.0,
       "fan_power_exponent": 3.0,
-      "fan_heat_fraction_to_dock": 1.0
+      "fan_heat_fraction_to_dock": 1.0,
+      "ua_w_k": 2034.6934298245008,
+      "startup_design_air_outlet_c": 0.6076759061833688,
+      "startup_design_lmtd_k": 7.593281510390789,
+      "startup_design_q_dock_w": 15450.0
     },
-    "condenser_ua_w_k": 18000.0,
+    "condenser_ua_w_k": 17711.102328185974,
     "subcooling_k": 0.0,
     "branch_holdup": {
       "outlet_enthalpy_time_constant_s": 5.0
     },
     "expansion_valves": {
       "cascade": {
-        "opening": 0.375,
+        "opening": 0.42732326061162096,
         "flow_coefficient_kg_s_pa": 1.5829e-07
       },
       "dock": {
-        "opening": 0.125,
+        "opening": 0.07541029892412364,
         "flow_coefficient_kg_s_pa": 1.5829e-07
       }
     }
@@ -174,11 +178,11 @@
     "dock_initial_c": 5.0,
     "ambient_c": 30.0,
     "load_step_time_s": 600.0,
-    "load_before_w": 43844.69420604,
-    "load_after_w": 43844.69420604,
-    "dock_load_before_w": 25750.0,
-    "dock_load_after_w": 25750.0,
-    "sink_m_dot_kg_s": 6.2,
+    "load_before_w": 47891.83413089731,
+    "load_after_w": 47891.83413089731,
+    "dock_load_before_w": 15450.0,
+    "dock_load_after_w": 15450.0,
+    "sink_m_dot_kg_s": 6.112851554438009,
     "sink_cp_j_kg_k": 4180.0
   },
   "disturbances": {
@@ -187,16 +191,13 @@
       "model": "tian_unsteady",
       "schedule": {
         "start_time_s": 5.0,
-        "ramp_time_s": 5.0,
-        "open_duration_s": 60.0,
+        "ramp_time_s": 2.0,
+        "open_duration_s": 12.0,
+        "opening_fraction": 1.0,
         "interval_s": 3600.0,
-        "repeat_count": 1,
-        "opening_fraction": 1.0
+        "repeat_count": 1
       },
-      "indoor_source": "dock",
-      "outdoor_source": "ambient",
-      "load_application": "dock_only",
-      "indoor_relative_humidity": 0.65,
+      "outdoor_source": "dock",
       "outdoor_relative_humidity": 0.65,
       "effectiveness": 0.96,
       "door": {
@@ -243,7 +244,7 @@
         "name": "B2_air_after_cascade_to_nh3_compressor_speed",
         "enabled": true,
         "measurement": "t3_c",
-        "setpoint": -15.0,
+        "setpoint": 4.0,
         "setpoint_from_startup": "t3_c",
         "actuator_path": "vcc_cycle.compressor.speed_rpm",
         "action": "direct",
@@ -321,17 +322,17 @@
   },
   "initial_guess": {
     "room_c": -30.0,
-    "sink_c": 30.0,
-    "t3_c": 4.0,
-    "t4_c": -15.0,
-    "t6_c": 6.0,
+    "sink_c": 35.0,
+    "t3_c": 5.0,
+    "t4_c": -26.5,
+    "t6_c": 1.5,
     "tevap_c": -5.0,
     "tcond_c": 40.0,
-    "m_ref_kg_s": 0.095625,
+    "m_ref_kg_s": 0.09548346502571002,
     "dock_c": 5.0
   },
   "output": {
-    "plot_file": "outputs/paper_reference_case_dock_infiltration.png",
-    "csv_file": "outputs/paper_reference_case_dock_infiltration.csv"
+    "plot_file": "outputs/RS_Infiltration_Qvc100_Qld15_8.png",
+    "csv_file": "outputs/RS_Infiltration_Qvc100_Qld15_8.csv"
   }
 }

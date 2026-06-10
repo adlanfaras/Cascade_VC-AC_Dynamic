@@ -25,6 +25,18 @@ class TianInfiltrationState:
     was_open: bool = False
 
 
+@dataclass(frozen=True)
+class DoorEvent:
+    t_open_s: float
+    t_close_s: float
+    opening_fraction: float
+    ramp_open_s: float = 0.0
+    ramp_close_s: float = 0.0
+    interval_s: float | None = None
+    repeat_count: int | None = None
+    repeat_until_s: float | None = None
+
+
 def zero_infiltration_result() -> dict[str, float]:
     return {
         "room_w": 0.0,
@@ -187,33 +199,194 @@ def _tian_effective_length_and_volume(
     raise ValueError(f"Unsupported Tian effective_length_model: {model}")
 
 
-def _door_events(cfg: dict[str, Any]) -> list[tuple[float, float]]:
-    schedule = cfg.get("schedule", {})
+def _first_seconds(
+    sources: tuple[dict[str, Any], ...],
+    second_keys: tuple[str, ...],
+    hour_keys: tuple[str, ...] = (),
+    default: float | None = None,
+) -> float | None:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in second_keys:
+            if key in source:
+                return float(source[key])
+        for key in hour_keys:
+            if key in source:
+                return 3600.0 * float(source[key])
+    return default
+
+
+def _first_float(sources: tuple[dict[str, Any], ...], keys: tuple[str, ...], default: float) -> float:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source:
+                return float(source[key])
+    return default
+
+
+def _first_int(sources: tuple[dict[str, Any], ...], keys: tuple[str, ...]) -> int | None:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source:
+                return int(source[key])
+    return None
+
+
+def _door_event_from_config(event: dict[str, Any], schedule: dict[str, Any], cfg: dict[str, Any]) -> DoorEvent:
+    sources = (event, schedule, cfg)
+
+    t_open = _first_seconds(
+        sources,
+        second_keys=("t_open_s",),
+        hour_keys=("t_open_h",),
+    )
+    if t_open is None:
+        t_open = _first_seconds(
+            sources,
+            second_keys=("start_time_s",),
+            hour_keys=("start_time_h",),
+            default=0.0,
+        )
+        delay_s = _first_seconds(
+            sources,
+            second_keys=("delay_s",),
+            hour_keys=("delay_h",),
+            default=0.0,
+        )
+        t_open = float(t_open or 0.0) + float(delay_s or 0.0)
+
+    duration_s = _first_seconds(
+        sources,
+        second_keys=("open_duration_s", "duration_s", "hold_time_s"),
+        hour_keys=("open_duration_h", "duration_h", "hold_time_h"),
+    )
+    t_close = _first_seconds(
+        sources,
+        second_keys=("t_close_s", "end_time_s"),
+        hour_keys=("t_close_h", "end_time_h"),
+    )
+    if t_close is None:
+        if duration_s is None:
+            duration_s = 60.0
+        t_close = t_open + max(float(duration_s), 0.0)
+
+    peak_fraction = _first_float(sources, ("opening_fraction", "f_open"), default=1.0)
+    ramp_s = _first_seconds(
+        sources,
+        second_keys=("door_ramp_time_s", "ramp_time_s"),
+        hour_keys=("door_ramp_time_h", "ramp_time_h"),
+        default=0.0,
+    )
+    ramp_open_s = _first_seconds(
+        sources,
+        second_keys=("door_ramp_open_time_s", "ramp_open_time_s"),
+        hour_keys=("door_ramp_open_time_h", "ramp_open_time_h"),
+        default=ramp_s,
+    )
+    ramp_close_s = _first_seconds(
+        sources,
+        second_keys=("door_ramp_close_time_s", "ramp_close_time_s"),
+        hour_keys=("door_ramp_close_time_h", "ramp_close_time_h"),
+        default=ramp_s,
+    )
+    repeat_count = _first_int(sources, ("repeat_count", "count", "n_events"))
+    repeat_until_s = _first_seconds(
+        sources,
+        second_keys=("repeat_until_s", "schedule_end_s"),
+        hour_keys=("repeat_until_h", "schedule_end_h"),
+    )
+    repeat_for_s = _first_seconds(
+        sources,
+        second_keys=("repeat_for_s", "schedule_duration_s"),
+        hour_keys=("repeat_for_h", "schedule_duration_h"),
+    )
+    if repeat_until_s is None and repeat_for_s is not None:
+        repeat_until_s = float(t_open) + max(float(repeat_for_s), 0.0)
+    interval_s = _first_seconds(
+        sources,
+        second_keys=("interval_s", "period_s"),
+        hour_keys=("interval_h", "period_h"),
+    )
+    if interval_s is None and repeat_count is not None and repeat_count > 1 and repeat_for_s is not None:
+        interval_s = max(float(repeat_for_s) / repeat_count, 0.0)
+
+    return DoorEvent(
+        t_open_s=float(t_open),
+        t_close_s=float(t_close),
+        opening_fraction=float(np.clip(peak_fraction, 0.0, 1.0)),
+        ramp_open_s=max(float(ramp_open_s or 0.0), 0.0),
+        ramp_close_s=max(float(ramp_close_s or 0.0), 0.0),
+        interval_s=max(float(interval_s), 0.0) if interval_s is not None else None,
+        repeat_count=max(int(repeat_count), 0) if repeat_count is not None else None,
+        repeat_until_s=float(repeat_until_s) if repeat_until_s is not None else None,
+    )
+
+
+def _door_events(cfg: dict[str, Any]) -> list[DoorEvent]:
+    raw_schedule = cfg.get("schedule", {})
+    schedule = raw_schedule if isinstance(raw_schedule, dict) else {}
     raw_events = schedule.get("events", cfg.get("events"))
     if raw_events:
-        return [(float(event["t_open_s"]), float(event["t_close_s"])) for event in raw_events]
+        return [_door_event_from_config(event, schedule, cfg) for event in raw_events]
 
-    t_open = cfg.get("t_open_s", schedule.get("t_open_s"))
-    t_close = cfg.get("t_close_s", schedule.get("t_close_s"))
-    if t_open is not None and t_close is not None:
-        return [(float(t_open), float(t_close))]
+    return [_door_event_from_config({}, schedule, cfg)]
 
-    start = float(cfg.get("start_time_s", 0.0)) + float(cfg.get("delay_s", 0.0))
-    if "open_duration_s" in cfg:
-        duration = float(cfg["open_duration_s"])
-    elif "open_duration_s" in schedule:
-        duration = float(schedule["open_duration_s"])
-    else:
-        duration = float(cfg.get("hold_time_s", 60.0))
-    return [(start, start + max(duration, 0.0))]
+
+def _single_opening_fraction(event: DoorEvent, time_s: float, t_open_s: float) -> float:
+    t_close_s = t_open_s + max(event.t_close_s - event.t_open_s, 0.0)
+    if not (t_open_s <= time_s < t_close_s):
+        return 0.0
+
+    duration_s = max(t_close_s - t_open_s, 0.0)
+    if duration_s <= 0.0:
+        return 0.0
+
+    ramp_open_s = min(event.ramp_open_s, duration_s)
+    ramp_close_s = min(event.ramp_close_s, max(duration_s - ramp_open_s, 0.0))
+
+    if ramp_open_s > 0.0 and time_s < t_open_s + ramp_open_s:
+        return event.opening_fraction * (time_s - t_open_s) / ramp_open_s
+
+    if ramp_close_s > 0.0 and time_s >= t_close_s - ramp_close_s:
+        return event.opening_fraction * (t_close_s - time_s) / ramp_close_s
+
+    return event.opening_fraction
+
+
+def _event_start_is_repeated(event: DoorEvent, index: int, t_open_s: float) -> bool:
+    if index < 0:
+        return False
+    if event.repeat_count is not None and index >= event.repeat_count:
+        return False
+    return event.repeat_until_s is None or t_open_s < event.repeat_until_s
+
+
+def _ramped_fraction(event: DoorEvent, time_s: float) -> float:
+    if event.interval_s is None or event.interval_s <= 0.0:
+        return _single_opening_fraction(event, time_s, event.t_open_s)
+    if time_s < event.t_open_s:
+        return 0.0
+
+    if event.interval_s <= 0.0:
+        return 0.0
+
+    index = int(math.floor((time_s - event.t_open_s) / event.interval_s))
+    fractions = [
+        _single_opening_fraction(event, time_s, event.t_open_s + candidate * event.interval_s)
+        for candidate in (index - 1, index)
+        if _event_start_is_repeated(event, candidate, event.t_open_s + candidate * event.interval_s)
+    ]
+    return max(fractions, default=0.0)
 
 
 def door_open_fraction(cfg: dict[str, Any], time_s: float) -> float:
-    for t_open, t_close in _door_events(cfg):
-        if t_open <= time_s < t_close:
-            fraction = float(cfg.get("opening_fraction", cfg.get("f_open", 1.0)))
-            return float(np.clip(fraction, 0.0, 1.0))
-    return 0.0
+    fraction = max(_ramped_fraction(event, time_s) for event in _door_events(cfg))
+    return float(np.clip(fraction, 0.0, 1.0))
 
 
 def tian_geometry(cfg: dict[str, Any], opening_fraction: float) -> dict[str, float]:
