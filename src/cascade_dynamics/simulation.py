@@ -28,12 +28,14 @@ from .model import (
     compressor_mass_flow_positive_displacement,
     compressor_uses_map_power_pressure_lift,
     compressor_volumetric_efficiency_clearance,
+    expansion_valve_flow_coefficient,
+    expansion_valve_flow_factor,
 )
 from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 18
+STARTUP_CACHE_VERSION = 20
 
 STATE_INDEX = {
     "room_c": 0,
@@ -74,7 +76,9 @@ PAPER_DESIGN_SOLVED_PATHS = [
     "vcc_cycle.compressor.eta_is",
     "vcc_cycle.compressor.displacement_m3_per_rev",
     "vcc_cycle.expansion_valves.cascade.opening",
+    "vcc_cycle.expansion_valves.cascade.flow_coefficient_m2",
     "vcc_cycle.expansion_valves.dock.opening",
+    "vcc_cycle.expansion_valves.dock.flow_coefficient_m2",
     "boundary_conditions.load_before_w",
     "boundary_conditions.load_after_w",
     "boundary_conditions.sink_m_dot_kg_s",
@@ -152,8 +156,8 @@ def _split_refrigerant_mass_flow(config: dict[str, Any], total_m_ref_kg_s: float
     valves = config.get("vcc_cycle", {}).get("expansion_valves", {})
     cascade = valves.get("cascade", {})
     dock = valves.get("dock", {})
-    cascade_weight = float(cascade.get("opening", 0.75)) * float(cascade.get("flow_coefficient_kg_s_pa", 1.0))
-    dock_weight = float(dock.get("opening", 0.25)) * float(dock.get("flow_coefficient_kg_s_pa", 1.0))
+    cascade_weight = float(cascade.get("opening", 0.75)) * max(expansion_valve_flow_coefficient(cascade), 1.0e-12)
+    dock_weight = float(dock.get("opening", 0.25)) * max(expansion_valve_flow_coefficient(dock), 1.0e-12)
     total_weight = cascade_weight + dock_weight
     if total_weight <= 0.0:
         cascade_fraction = 0.75
@@ -296,15 +300,6 @@ def _set_and_mirror_room_load(config: dict[str, Any], value_w: float) -> None:
         config["boundary_conditions"]["load_after_w"] = float(value_w)
 
 
-def _dock_air_flow_fan_heat_w(dock_cfg: dict[str, Any], air_m_dot_kg_s: float) -> float:
-    design_air_m_dot = max(float(dock_cfg.get("design_air_m_dot_kg_s", air_m_dot_kg_s)), 1.0e-9)
-    flow_ratio = max(float(air_m_dot_kg_s) / design_air_m_dot, 0.0)
-    power_ref_w = float(dock_cfg.get("fan_power_ref_w", dock_cfg.get("power_ref_w", 0.0)))
-    power_exponent = float(dock_cfg.get("fan_power_exponent", dock_cfg.get("power_exponent", 3.0)))
-    heat_fraction = float(dock_cfg.get("fan_heat_fraction_to_dock", dock_cfg.get("heat_fraction_to_dock", 1.0)))
-    return power_ref_w * flow_ratio**power_exponent * heat_fraction
-
-
 def _backcalculate_dock_evaporator_design(config: dict[str, Any], unknowns: np.ndarray) -> None:
     dock_cfg = config["vcc_cycle"].get("dock_evaporator")
     if not isinstance(dock_cfg, dict):
@@ -326,8 +321,7 @@ def _backcalculate_dock_evaporator_design(config: dict[str, Any], unknowns: np.n
     if mcp <= 0.0:
         raise RuntimeError("Dock evaporator design air mass flow must be positive for startup UA back-calculation.")
 
-    fan_heat_w = _dock_air_flow_fan_heat_w(dock_cfg, design_air_m_dot)
-    q_design_w = float(config["boundary_conditions"]["dock_load_before_w"]) + fan_heat_w
+    q_design_w = float(config["boundary_conditions"]["dock_load_before_w"])
     air_outlet_c = dock_c - q_design_w / mcp
     if air_outlet_c <= tevap_c:
         raise RuntimeError(
@@ -978,14 +972,32 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
         "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
     }
+    valve_inlet_density = float(PropsSI("D", "P", p_cond, "H", h9, ref_fluid))
+    valve_flow_factor = expansion_valve_flow_factor(p_cond, p_evap, valve_inlet_density)
     for branch, (_, branch_m_ref) in branch_targets.items():
         valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
-        valve_cfg.setdefault("flow_coefficient_kg_s_pa", legacy_valve_cfg.get("flow_coefficient_kg_s_pa", 0.0))
-        valve_opening = branch_m_ref / max(
-            float(valve_cfg["flow_coefficient_kg_s_pa"]) * max(p_cond - p_evap, 0.0),
-            1.0e-12,
+        had_orifice_coefficient = "flow_coefficient_m2" in valve_cfg or "flow_coefficient_kg_s_sqrt_pa_density" in valve_cfg
+        if "flow_coefficient_m2" not in valve_cfg:
+            legacy_coefficient = legacy_valve_cfg.get(
+                "flow_coefficient_m2",
+                legacy_valve_cfg.get("flow_coefficient_kg_s_sqrt_pa_density", legacy_valve_cfg.get("flow_coefficient_kg_s_pa", 0.0)),
+            )
+            valve_cfg.setdefault("flow_coefficient_m2", legacy_coefficient)
+        opening_min = float(valve_cfg.get("opening_min", 0.05))
+        opening_max = float(valve_cfg.get("opening_max", 1.0))
+        opening_target = float(np.clip(float(valve_cfg.get("opening", 0.5)), opening_min, opening_max))
+        backcalculate_coefficient = bool(
+            valve_cfg.get(
+                "startup_backcalculate_flow_coefficient_m2",
+                not had_orifice_coefficient,
+            )
         )
-        valve_cfg["opening"] = float(np.clip(valve_opening, valve_cfg.get("opening_min", 0.05), valve_cfg.get("opening_max", 1.0)))
+        if backcalculate_coefficient:
+            valve_cfg["flow_coefficient_m2"] = float(branch_m_ref / max(opening_target * valve_flow_factor, 1.0e-12))
+            valve_cfg["opening"] = opening_target
+        else:
+            valve_opening = branch_m_ref / max(expansion_valve_flow_coefficient(valve_cfg) * valve_flow_factor, 1.0e-12)
+            valve_cfg["opening"] = float(np.clip(valve_opening, opening_min, opening_max))
 
     ref = model._evaluate_refrigerant_cycle(
         tevap_c + KELVIN_OFFSET,
@@ -1409,9 +1421,10 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
                 controller["bias"] = float(startup_snapshot[solved_bias_key])
 
     configure_disturbances(plant_config)
+    model.reset_room_moisture(float(unknowns[0]))
     model.reset_infiltration_disturbance(float(unknowns[0]), float(unknowns[9]))
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
-    state = np.array([unknowns[0], unknowns[1], unknowns[9]], dtype=float)
+    state = np.array([unknowns[0], unknowns[1], unknowns[9], model.current_room_humidity_ratio()], dtype=float)
     history: list[dict[str, float]] = []
     jacobian_workers = max(1, int(sim_cfg.get("jacobian_workers", 1)))
 
@@ -1439,6 +1452,7 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
 
             prev_state = state.copy()
             model.advance_infiltration_disturbance(time_s, dt_s, history[-1])
+            model.advance_room_moisture(dt_s, history[-1])
             controller_outputs = control.update(history[-1], plant_config, dt_s)
 
             def residual_fn(x: np.ndarray) -> np.ndarray:

@@ -23,12 +23,10 @@ Use one of the included refrigerated-space or loading-dock infiltration configs:
 config/RS_Infiltration_Qvc100_Qld25_2.json
 config/RS_Infiltration_Qvc100_Qld25_4.json
 config/RS_Infiltration_Qvc100_Qld25_8.json
-config/LD_Infiltration_Qvc100_Qld25_2.json
-config/LD_Infiltration_Qvc100_Qld25_4.json
-config/LD_Infiltration_Qvc100_Qld25_8.json
+config/LD_Infiltration_Qvc100_Qld25_1.json
 ```
 
-The full config matrix covers matching Qvc/Qld load variations for refrigerated-space (`RS_...`) and loading-dock (`LD_...`) infiltration. Loading-dock configs apply ambient infiltration to the dock load only. All included infiltration configs use an effectiveness of `0.96`, a `2.8 m x 3.3 m` door, and a one-opening-per-hour schedule.
+The refrigerated-space (`RS_...`) matrix covers matching Qvc/Qld load variations with `2`, `4`, and `8` openings per hour. The loading-dock (`LD_...`) matrix covers the same Qvc/Qld load variations with one opening per hour only. Loading-dock configs apply ambient infiltration to the dock load only. All included infiltration configs use an effectiveness of `0.96` and a `2.8 m x 3.3 m` door.
 
 Door-opening disturbances can be configured with explicit open/close times, or with a repeating start/duration/interval schedule. Durations may be provided in seconds or hours:
 
@@ -40,8 +38,8 @@ Door-opening disturbances can be configured with explicit open/close times, or w
     "start_time_s": 5.0,
     "ramp_time_s": 2.0,
     "open_duration_s": 12.0,
-    "interval_s": 3600.0,
-    "repeat_count": 1,
+    "interval_s": 450.0,
+    "repeat_count": 8,
     "opening_fraction": 1.0
   },
   "effectiveness": 0.96,
@@ -52,7 +50,7 @@ Door-opening disturbances can be configured with explicit open/close times, or w
 }
 ```
 
-Here `interval_s` is the time from one opening start to the next opening start. Use `door_ramp_open_time_s` and `door_ramp_close_time_s` if the opening and closing ramps should have different durations. Existing `t_open_s`/`t_close_s` configs remain supported.
+Here `interval_s` is the time from one opening start to the next opening start. RS configs use `1800 s`, `900 s`, and `450 s` intervals for the `_2`, `_4`, and `_8` files. LD configs use `3600 s` and `repeat_count: 1`. Use `door_ramp_open_time_s` and `door_ramp_close_time_s` if the opening and closing ramps should have different durations. Existing `t_open_s`/`t_close_s` configs remain supported.
 
 ## Run One Case
 
@@ -65,7 +63,7 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case_dock_in
 ```
 
 ```powershell
-python -m src.cascade_dynamics.main --config config/LD_Infiltration_Qvc100_Qld25_8.json
+python -m src.cascade_dynamics.main --config config/LD_Infiltration_Qvc100_Qld25_1.json
 ```
 
 ## Run Door-Duration Cases

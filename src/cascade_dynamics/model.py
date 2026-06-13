@@ -10,6 +10,7 @@ from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actua
 from .fluids import h_refrigerant_liquid, p_sat
 from .humid_air import (
     humid_air_state,
+    saturation_humidity_ratio,
     saturated_room_humidity_ratio,
     state_at_enthalpy,
     state_at_entropy,
@@ -26,6 +27,8 @@ from .infiltration import (
 
 KELVIN_OFFSET = 273.15
 CP_DOCK_AIR = 1005.0
+H_FG_WATER = 2.501e6
+H_SUBLIMATION_ICE = 2.834e6
 MAP_POWER_PRESSURE_LIFT_MODES = {
     "map_power_backcalculate",
     "map_power_lift",
@@ -129,10 +132,39 @@ def compressor_mass_flow_positive_displacement(
     )
 
 
+def expansion_valve_flow_factor(
+    p_upstream_pa: float,
+    p_downstream_pa: float,
+    inlet_density_kg_m3: float,
+) -> float:
+    return float(np.sqrt(2.0 * max(float(inlet_density_kg_m3), 0.0) * max(float(p_upstream_pa) - float(p_downstream_pa), 0.0)))
+
+
+def expansion_valve_flow_coefficient(valve_cfg: dict) -> float:
+    return float(
+        valve_cfg.get(
+            "flow_coefficient_m2",
+            valve_cfg.get("flow_coefficient_kg_s_sqrt_pa_density", valve_cfg.get("flow_coefficient_kg_s_pa", 0.0)),
+        )
+    )
+
+
 @dataclass
 class StepResult:
     values: dict[str, float]
     state_vector: np.ndarray
+
+
+@dataclass
+class RoomMoistureState:
+    humidity_ratio: float = 0.0
+    relative_humidity: float = 0.0
+    saturation_humidity_ratio: float = 0.0
+    dry_air_mass_kg: float = 0.0
+    deposition_rate_kg_s: float = 0.0
+    q_deposition_w: float = 0.0
+    cumulative_deposited_water_kg: float = 0.0
+    infiltration_dry_air_mass_flow_kg_s: float = 0.0
 
 
 class CascadeSystemModel:
@@ -142,6 +174,8 @@ class CascadeSystemModel:
         self.ref_fluid = config["fluids"]["refrigerant"]
         self._infiltration_state = TianInfiltrationState()
         self._current_infiltration = zero_infiltration_result()
+        self._room_moisture = RoomMoistureState()
+        self._room_moisture_initialized = False
         self._branch_holdup_h: dict[str, float] = {}
         self._branch_holdup_time_s: float | None = None
 
@@ -153,15 +187,114 @@ class CascadeSystemModel:
         mode = str(cfg.get("model", cfg.get("magnitude_mode", ""))).lower()
         return cfg.get("enabled", False) and mode in {"tian", "tian_unsteady", "tian_analytical"}
 
-    def _room_humidity_ratio(self, room_k: float, pressure_pa: float) -> float | None:
+    def _configured_room_humidity_ratio(self, room_k: float, pressure_pa: float) -> float:
         humidity_cfg = self.cfg["air_cycle"].get("humid_air", {})
         x_room = humidity_cfg.get("humidity_ratio")
         if x_room is not None:
             return float(x_room)
-        relative_humidity = humidity_cfg.get("room_relative_humidity")
-        if relative_humidity is not None:
-            return saturated_room_humidity_ratio(room_k, pressure_pa, float(relative_humidity))
-        return None
+        relative_humidity = humidity_cfg.get("room_relative_humidity", humidity_cfg.get("initial_relative_humidity", 1.0))
+        return saturated_room_humidity_ratio(room_k, pressure_pa, float(relative_humidity))
+
+    def _room_humidity_ratio(self, room_k: float, pressure_pa: float) -> float:
+        if self._room_moisture_initialized:
+            return float(self._room_moisture.humidity_ratio)
+        return self._configured_room_humidity_ratio(room_k, pressure_pa)
+
+    def _room_air_volume_m3(self) -> float:
+        humidity_cfg = self.cfg["air_cycle"].get("humid_air", {})
+        for key in ("room_volume_m3", "volume_m3"):
+            if key in humidity_cfg:
+                return max(float(humidity_cfg[key]), 1.0e-9)
+
+        infiltration_cfg = self._infiltration_cfg()
+        for source_key in ("room", "indoor"):
+            room_cfg = infiltration_cfg.get(source_key, {})
+            if not isinstance(room_cfg, dict):
+                continue
+            width_m = room_cfg.get("width_m")
+            height_m = room_cfg.get("height_m")
+            length_m = room_cfg.get("length_m", room_cfg.get("depth_m"))
+            if width_m is not None and height_m is not None and length_m is not None:
+                return max(float(width_m) * float(height_m) * float(length_m), 1.0e-9)
+
+        return max(float(humidity_cfg.get("default_room_volume_m3", 100.0)), 1.0e-9)
+
+    def _room_dry_air_mass_kg(self, room_k: float, pressure_pa: float, humidity_ratio: float) -> float:
+        humidity_cfg = self.cfg["air_cycle"].get("humid_air", {})
+        if "room_dry_air_mass_kg" in humidity_cfg:
+            return max(float(humidity_cfg["room_dry_air_mass_kg"]), 1.0e-9)
+        state = humid_air_state(room_k, pressure_pa, humidity_ratio)
+        return max(state.dry_air_density_kg_m3 * self._room_air_volume_m3(), 1.0e-9)
+
+    def _update_room_moisture_properties(self, room_k: float, pressure_pa: float) -> None:
+        omega = max(float(self._room_moisture.humidity_ratio), 0.0)
+        omega_sat = saturation_humidity_ratio(room_k, pressure_pa)
+        self._room_moisture.humidity_ratio = omega
+        self._room_moisture.saturation_humidity_ratio = omega_sat
+        self._room_moisture.relative_humidity = omega / max(omega_sat, 1.0e-12)
+        self._room_moisture.dry_air_mass_kg = self._room_dry_air_mass_kg(room_k, pressure_pa, omega)
+
+    def reset_room_moisture(self, room_c: float) -> None:
+        p1 = float(self.cfg["air_cycle"]["p_low_pa"])
+        room_k = float(room_c) + KELVIN_OFFSET
+        omega = self._configured_room_humidity_ratio(room_k, p1)
+        self._room_moisture = RoomMoistureState(humidity_ratio=max(omega, 0.0))
+        self._room_moisture_initialized = True
+        self._update_room_moisture_properties(room_k, p1)
+
+    def current_room_humidity_ratio(self) -> float:
+        return float(self._room_moisture.humidity_ratio)
+
+    def _infiltration_affects_room_moisture(self) -> bool:
+        cfg = self._infiltration_cfg()
+        if not cfg.get("enabled", False):
+            return False
+        source = self._infiltration_indoor_source()
+        return source in {"room", "cold_room", "refrigerated_space"}
+
+    def advance_room_moisture(self, dt_s: float, previous_values: dict[str, float]) -> None:
+        if not self._room_moisture_initialized:
+            self.reset_room_moisture(float(previous_values["room_c"]))
+
+        p1 = float(self.cfg["air_cycle"]["p_low_pa"])
+        room_k = float(previous_values["room_c"]) + KELVIN_OFFSET
+        omega_old = max(float(self._room_moisture.humidity_ratio), 0.0)
+        m_da_room = self._room_dry_air_mass_kg(room_k, p1, omega_old)
+        m_da_in = 0.0
+        omega_outdoor = omega_old
+
+        if self._infiltration_affects_room_moisture():
+            infiltration = self._current_infiltration
+            q_m3_s = max(float(infiltration.get("q_m3_s", 0.0)), 0.0)
+            omega_outdoor = float(infiltration.get("omega_outdoor_kg_kg_da", omega_old))
+            rho_outdoor = max(float(infiltration.get("rho_outdoor_kg_m3", 0.0)), 0.0)
+            if q_m3_s > 0.0 and rho_outdoor > 0.0:
+                m_da_in = q_m3_s * rho_outdoor / max(1.0 + max(omega_outdoor, 0.0), 1.0e-9)
+
+        omega_trial = omega_old
+        if dt_s > 0.0 and m_da_in > 0.0:
+            omega_trial += float(dt_s) * m_da_in * (omega_outdoor - omega_old) / m_da_room
+        omega_trial = max(omega_trial, 0.0)
+
+        omega_sat = saturation_humidity_ratio(room_k, p1)
+        deposited_water_kg = max((omega_trial - omega_sat) * m_da_room, 0.0)
+        if deposited_water_kg > 0.0:
+            omega_new = omega_sat
+        else:
+            omega_new = omega_trial
+
+        h_phase = float(
+            self.cfg["air_cycle"]
+            .get("humid_air", {})
+            .get("h_deposition_j_kg", H_SUBLIMATION_ICE if room_k < KELVIN_OFFSET else H_FG_WATER)
+        )
+        deposition_rate = deposited_water_kg / max(float(dt_s), 1.0e-9)
+        self._room_moisture.humidity_ratio = omega_new
+        self._room_moisture.deposition_rate_kg_s = deposition_rate
+        self._room_moisture.q_deposition_w = deposition_rate * h_phase
+        self._room_moisture.cumulative_deposited_water_kg += deposited_water_kg
+        self._room_moisture.infiltration_dry_air_mass_flow_kg_s = m_da_in
+        self._update_room_moisture_properties(room_k, p1)
 
     def _infiltration_indoor_source(self) -> str:
         return str(self._infiltration_cfg().get("indoor_source", "room")).lower()
@@ -331,7 +464,11 @@ class CascadeSystemModel:
         }
 
     def load_w(self, time_s: float) -> float:
-        return self._base_room_load_w(time_s) + self.infiltration_disturbance_w(time_s)["room_w"]
+        return (
+            self._base_room_load_w(time_s)
+            + self.infiltration_disturbance_w(time_s)["room_w"]
+            + self._room_moisture.q_deposition_w
+        )
 
     def dock_load_w(self, time_s: float) -> float:
         return self._base_dock_load_w(time_s) + self.infiltration_disturbance_w(time_s)["dock_w"]
@@ -348,7 +485,14 @@ class CascadeSystemModel:
         branch_cfg = dict(vcc_cfg.get("expansion_valves", {}).get(branch, {}))
         merged = {**base_cfg, **branch_cfg}
         merged.setdefault("opening", 0.5)
-        merged.setdefault("flow_coefficient_kg_s_pa", base_cfg.get("flow_coefficient_kg_s_pa", 0.0))
+        if "flow_coefficient_m2" not in merged:
+            merged.setdefault(
+                "flow_coefficient_m2",
+                base_cfg.get(
+                    "flow_coefficient_m2",
+                    base_cfg.get("flow_coefficient_kg_s_sqrt_pa_density", base_cfg.get("flow_coefficient_kg_s_pa", 0.0)),
+                ),
+            )
         return merged
 
     def startup_evaluation(self, unknowns: np.ndarray, time_s: float) -> tuple[np.ndarray, dict[str, float]]:
@@ -369,7 +513,6 @@ class CascadeSystemModel:
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
         dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
         q_dock_evap = dock_evap["q_w"]
-        dock_fan_heat = dock_evap["fan_heat_w"]
         infiltration = self.infiltration_disturbance_w(time_s)
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref_cascade, m_ref_dock, air["q_cascade"], q_dock_evap)
 
@@ -390,7 +533,7 @@ class CascadeSystemModel:
         balances = np.array(
             [
                 air["q_room"] - self.load_w(time_s),
-                q_dock_evap - (self.dock_load_w(time_s) + dock_fan_heat),
+                q_dock_evap - self.dock_load_w(time_s),
                 ref["q_cond"] - sink_rejection,
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -440,8 +583,6 @@ class CascadeSystemModel:
             "dock_evaporator_air_outlet_c": dock_evap["air_outlet_c"],
             "dock_evaporator_air_delta_t_k": dock_evap["air_delta_t_k"],
             "dock_air_m_dot_kg_s": dock_evap["air_m_dot_kg_s"],
-            "dock_fan_power_w": dock_evap["fan_power_w"],
-            "dock_fan_heat_w": dock_fan_heat,
             "q_cascade_refrigerant_w": ref["q_cascade_branch"],
             "q_dock_refrigerant_w": ref["q_dock_branch"],
             "q_evap_total_w": ref["q_evap_total"],
@@ -505,12 +646,7 @@ class CascadeSystemModel:
     def _evaluate_air_cycle(self, room_k: float, t3_k: float, t4_k: float, t6_k: float) -> dict[str, float]:
         air_cfg = self.cfg["air_cycle"]
         p1 = air_cfg["p_low_pa"]
-        humidity_cfg = air_cfg.get("humid_air", {})
-        relative_humidity = humidity_cfg.get("room_relative_humidity", 1.0)
-        x_room = humidity_cfg.get("humidity_ratio")
-        if x_room is None:
-            x_room = saturated_room_humidity_ratio(room_k, p1, relative_humidity)
-        x_room = float(x_room)
+        x_room = self._room_humidity_ratio(room_k, p1)
 
         state_room = humid_air_state(room_k, p1, x_room)
         state1 = humid_air_state(t6_k, p1, x_room)
@@ -659,10 +795,10 @@ class CascadeSystemModel:
         head = 0.5 * (lo + hi)
         return head, volumetric_flow_from_head(flow_cfg, head)
 
-    def _branch_valve_flow(self, valve_cfg: dict, p_cond: float, p_evap: float) -> float:
-        coefficient = float(valve_cfg.get("flow_coefficient_kg_s_pa", 0.0))
+    def _branch_valve_flow(self, valve_cfg: dict, p_cond: float, p_evap: float, inlet_density_kg_m3: float) -> float:
+        coefficient = expansion_valve_flow_coefficient(valve_cfg)
         opening = float(valve_cfg.get("opening", 0.0))
-        return coefficient * opening * max(p_cond - p_evap, 0.0)
+        return coefficient * opening * expansion_valve_flow_factor(p_cond, p_evap, inlet_density_kg_m3)
 
     def _evaluate_refrigerant_cycle(
         self,
@@ -785,13 +921,14 @@ class CascadeSystemModel:
         h8 = h7 + w_ref_comp / max(m_ref_compressor, 1.0e-6)
         t8_k = float(PropsSI("T", "P", p_cond, "H", h8, self.ref_fluid))
         q_cond = evap_total + w_ref_comp
+        valve_inlet_density = float(PropsSI("D", "P", p_cond, "H", h9, self.ref_fluid))
         if has_branch_valves:
-            m_ref_valve_cascade = self._branch_valve_flow(cascade_valve_cfg, p_cond, p_evap)
-            m_ref_valve_dock = self._branch_valve_flow(dock_valve_cfg, p_cond, p_evap)
+            m_ref_valve_cascade = self._branch_valve_flow(cascade_valve_cfg, p_cond, p_evap, valve_inlet_density)
+            m_ref_valve_dock = self._branch_valve_flow(dock_valve_cfg, p_cond, p_evap, valve_inlet_density)
             m_ref_valve = m_ref_valve_cascade + m_ref_valve_dock
         else:
             valve_cfg = vcc_cfg["expansion_valve"]
-            m_ref_valve = valve_cfg["flow_coefficient_kg_s_pa"] * valve_cfg["opening"] * max(p_cond - p_evap, 0.0)
+            m_ref_valve = self._branch_valve_flow(valve_cfg, p_cond, p_evap, valve_inlet_density)
             m_ref_valve_cascade = m_ref_valve
             m_ref_valve_dock = 0.0
         return {
@@ -878,8 +1015,6 @@ class CascadeSystemModel:
         model = str(dock_cfg.get("model", "fixed_ua")).lower()
         air_m_dot = 0.0
         air_flow_ratio = 0.0
-        fan_power_w = 0.0
-        fan_heat_w = 0.0
         lmtd_k = max(dock_c - tevap_c, 0.0)
         air_outlet_c = dock_c
         air_delta_t_k = 0.0
@@ -893,12 +1028,6 @@ class CascadeSystemModel:
             air_m_dot = float(np.clip(air_m_dot, air_m_dot_min, air_m_dot_max))
             air_m_dot_ref = max(float(dock_cfg.get("design_air_m_dot_kg_s", air_m_dot)), 1.0e-9)
             air_flow_ratio = max(air_m_dot / air_m_dot_ref, 0.0)
-
-            power_ref_w = float(dock_cfg.get("fan_power_ref_w", dock_cfg.get("power_ref_w", 0.0)))
-            power_exponent = float(dock_cfg.get("fan_power_exponent", dock_cfg.get("power_exponent", 3.0)))
-            fan_power_w = power_ref_w * air_flow_ratio**power_exponent
-            fan_heat_fraction = float(dock_cfg.get("fan_heat_fraction_to_dock", dock_cfg.get("heat_fraction_to_dock", 1.0)))
-            fan_heat_w = fan_power_w * fan_heat_fraction
 
             delta_t_in = max(dock_c - tevap_c, 0.0)
             mcp = air_m_dot * air_cp
@@ -923,16 +1052,13 @@ class CascadeSystemModel:
             "air_inlet_c": dock_c,
             "air_outlet_c": air_outlet_c,
             "air_delta_t_k": air_delta_t_k,
-            "fan_m_dot_kg_s": air_m_dot,
-            "fan_flow_ratio": air_flow_ratio,
-            "fan_power_w": fan_power_w,
-            "fan_heat_w": fan_heat_w,
+            "air_flow_ratio": air_flow_ratio,
         }
 
     def residual(self, unknowns: np.ndarray, prev_state: np.ndarray, time_s: float, dt_s: float) -> np.ndarray:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns
         m_ref = m_ref_cascade + m_ref_dock
-        prev_room_c, prev_sink_c, prev_dock_c = prev_state
+        prev_room_c, prev_sink_c, prev_dock_c = prev_state[:3]
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -970,7 +1096,6 @@ class CascadeSystemModel:
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
         room_load_w = self.load_w(time_s)
         dock_load_w = self.dock_load_w(time_s)
-        dock_fan_heat = dock_evap["fan_heat_w"]
         if ref["uses_map_cooling_capacity_balance"]:
             cascade_balance = ref["q_evap_load_requested"] - ref["compressor_map_q_w"]
         else:
@@ -979,7 +1104,7 @@ class CascadeSystemModel:
         res = np.array(
             [
                 room_c - prev_room_c - dt_s * (room_load_w - air["q_room"]) / caps["room_capacitance_j_k"],
-                dock_c - prev_dock_c - dt_s * (dock_load_w + dock_fan_heat - q_dock_evap) / caps["dock_capacitance_j_k"],
+                dock_c - prev_dock_c - dt_s * (dock_load_w - q_dock_evap) / caps["dock_capacitance_j_k"],
                 sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
                 air["q_reg_hot"] - air["q_reg_cold"],
                 air["q_reg_hot"] - q_reg_ua,
@@ -1016,6 +1141,7 @@ class CascadeSystemModel:
         tevap_k = tevap_c + KELVIN_OFFSET
         tcond_k = tcond_c + KELVIN_OFFSET
         air_cfg = self.cfg["air_cycle"]
+        self._update_room_moisture_properties(room_k, air_cfg["p_low_pa"])
         air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
         dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
         q_dock = dock_evap["q_w"]
@@ -1023,10 +1149,9 @@ class CascadeSystemModel:
         ref = self._evaluate_refrigerant_cycle(tevap_k, tcond_k, m_ref_cascade, m_ref_dock, air["q_cascade"], q_dock)
         branch_holdup = self._branch_holdup_outputs(ref, tevap_k, time_s)
         air_input_power = (air["w_air_comp"] - air["w_air_turb"]) / max(air_cfg.get("combined_drive_efficiency", 1.0), 1.0e-6)
-        dock_fan_power = dock_evap["fan_power_w"]
-        q_dock_external = max(q_dock - dock_evap["fan_heat_w"], 0.0)
+        q_dock_external = q_dock
         useful_cooling = air["q_room"] + q_dock_external
-        total_input_power = air_input_power + ref["w_ref_comp"] + dock_fan_power
+        total_input_power = air_input_power + ref["w_ref_comp"]
         cop = useful_cooling / max(total_input_power, 1.0)
         cop_room_only = air["q_room"] / max(total_input_power, 1.0)
         t2_c = air["t2_k"] - KELVIN_OFFSET
@@ -1062,7 +1187,6 @@ class CascadeSystemModel:
             "w_air_turb_w": air["w_air_turb"],
             "w_air_input_w": air_input_power,
             "w_ref_comp_w": ref["w_ref_comp"],
-            "w_dock_fan_w": dock_fan_power,
             "w_total_input_w": total_input_power,
             "w_ref_isentropic_w": ref["w_ref_isentropic"],
             "refrigerant_compressor_speed_rpm": ref["compressor_speed_rpm"],
@@ -1094,11 +1218,15 @@ class CascadeSystemModel:
             "dock_evaporator_air_outlet_c": dock_evap["air_outlet_c"],
             "dock_evaporator_air_delta_t_k": dock_evap["air_delta_t_k"],
             "dock_air_m_dot_kg_s": dock_evap["air_m_dot_kg_s"],
-            "dock_fan_m_dot_kg_s": dock_evap["fan_m_dot_kg_s"],
-            "dock_air_flow_ratio": dock_evap["fan_flow_ratio"],
-            "dock_fan_power_w": dock_fan_power,
-            "dock_fan_heat_w": dock_evap["fan_heat_w"],
+            "dock_air_flow_ratio": dock_evap["air_flow_ratio"],
             "humidity_ratio_room_kg_kg_da": air["humidity_ratio_room"],
+            "room_relative_humidity": self._room_moisture.relative_humidity,
+            "room_saturation_humidity_ratio_kg_kg_da": self._room_moisture.saturation_humidity_ratio,
+            "room_dry_air_mass_kg": self._room_moisture.dry_air_mass_kg,
+            "room_moisture_infiltration_dry_air_mass_flow_kg_s": self._room_moisture.infiltration_dry_air_mass_flow_kg_s,
+            "room_moisture_deposition_rate_kg_s": self._room_moisture.deposition_rate_kg_s,
+            "room_moisture_deposition_load_w": self._room_moisture.q_deposition_w,
+            "room_moisture_cumulative_deposited_water_kg": self._room_moisture.cumulative_deposited_water_kg,
             "humidity_ratio_supply_vapor_kg_kg_da": air["humidity_ratio_5_vapor"],
             "humidity_ratio_supply_ice_kg_kg_da": air["humidity_ratio_5_ice"],
             "ice_mass_flow_kg_s": air["ice_mass_flow"],
@@ -1149,4 +1277,7 @@ class CascadeSystemModel:
             "load_w": self.load_w(time_s),
             "dock_load_w": self.dock_load_w(time_s),
         }
-        return StepResult(values=values, state_vector=np.array([room_c, sink_c, dock_c], dtype=float))
+        return StepResult(
+            values=values,
+            state_vector=np.array([room_c, sink_c, dock_c, self._room_moisture.humidity_ratio], dtype=float),
+        )

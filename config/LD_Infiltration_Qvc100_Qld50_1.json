@@ -335,7 +335,7 @@
     "dock_c": 5.0
   },
   "output": {
-    "plot_file": "outputs/LD_Infiltration_Qvc100_Qld50_2.png",
-    "csv_file": "outputs/LD_Infiltration_Qvc100_Qld50_2.csv"
+    "plot_file": "outputs/LD_Infiltration_Qvc100_Qld50_1.png",
+    "csv_file": "outputs/LD_Infiltration_Qvc100_Qld50_1.csv"
   }
 }
