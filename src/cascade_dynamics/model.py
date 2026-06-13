@@ -3,11 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from CoolProp.CoolProp import PropsSI
 
 from .compressor_map import ammonia_compressor_map, head_from_mass_flow, mass_flow_from_isentropic_head, volumetric_flow_from_head
 from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actual_enthalpy
-from .fluids import h_refrigerant_liquid, p_sat
+from .fluids import fluid_property, h_refrigerant_liquid, p_sat, props_si
 from .humid_air import (
     humid_air_state,
     saturation_humidity_ratio,
@@ -63,13 +62,13 @@ def compressor_discharge_pressure_from_power(
     target_h_is = h_suction_j_kg + max(float(power_w), 0.0) * max(float(eta_is), 1.0e-6) / max(float(mass_flow_kg_s), 1.0e-9)
     lo = max(float(p_suction_pa) * max(float(pressure_ratio_min), 1.000001), float(p_suction_pa) * 1.000001)
     if pressure_ratio_max is None:
-        hi = 0.999 * float(PropsSI("Pcrit", fluid))
+        hi = 0.999 * fluid_property("Pcrit", fluid)
     else:
         hi = float(p_suction_pa) * max(float(pressure_ratio_max), float(pressure_ratio_min) * 1.001)
     hi = max(hi, lo * 1.001)
 
     def residual(pressure_pa: float) -> float:
-        h_is = float(PropsSI("H", "P", pressure_pa, "S", s_suction_j_kg_k, fluid))
+        h_is = props_si("H", "P", pressure_pa, "S", s_suction_j_kg_k, fluid)
         return h_is - target_h_is
 
     f_lo = residual(lo)
@@ -100,7 +99,7 @@ def compressor_eta_is_from_map_power(
     power_w: float,
     fluid: str,
 ) -> float:
-    h_is = float(PropsSI("H", "P", p_discharge_pa, "S", s_suction_j_kg_k, fluid))
+    h_is = props_si("H", "P", p_discharge_pa, "S", s_suction_j_kg_k, fluid)
     return max(float(mass_flow_kg_s), 1.0e-9) * max(h_is - h_suction_j_kg, 0.0) / max(float(power_w), 1.0e-9)
 
 
@@ -858,10 +857,10 @@ class CascadeSystemModel:
         h_cascade_out = h10 + q_cascade_branch / max(m_ref_cascade, 1.0e-9)
         h_dock_out = h10 + q_dock_branch / max(m_ref_dock, 1.0e-9)
         h7 = (m_ref_cascade * h_cascade_out + m_ref_dock * h_dock_out) / max(m_ref, 1.0e-9)
-        t7_k = float(PropsSI("T", "P", p_evap, "H", h7, self.ref_fluid))
-        s7 = float(PropsSI("S", "P", p_evap, "H", h7, self.ref_fluid))
-        t_cascade_out_k = float(PropsSI("T", "P", p_evap, "H", h_cascade_out, self.ref_fluid))
-        t_dock_out_k = float(PropsSI("T", "P", p_evap, "H", h_dock_out, self.ref_fluid))
+        t7_k = props_si("T", "P", p_evap, "H", h7, self.ref_fluid)
+        s7 = props_si("S", "P", p_evap, "H", h7, self.ref_fluid)
+        t_cascade_out_k = props_si("T", "P", p_evap, "H", h_cascade_out, self.ref_fluid)
+        t_dock_out_k = props_si("T", "P", p_evap, "H", h_dock_out, self.ref_fluid)
 
         if has_branch_valves:
             for _ in range(3):
@@ -897,7 +896,7 @@ class CascadeSystemModel:
                 )
         elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
             pressure_ratio = p_cond / max(p_evap, 1.0e-9)
-            compressor_suction_density = float(PropsSI("D", "P", p_evap, "H", h7, self.ref_fluid))
+            compressor_suction_density = props_si("D", "P", p_evap, "H", h7, self.ref_fluid)
             compressor_eta_v = compressor_volumetric_efficiency_clearance(
                 pressure_ratio,
                 float(compressor_cfg.get("clearance_factor", 0.05)),
@@ -911,17 +910,17 @@ class CascadeSystemModel:
                 compressor_displacement,
                 compressor_eta_v,
             )
-            h8s_for_work = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
+            h8s_for_work = props_si("H", "P", p_cond, "S", s7, self.ref_fluid)
             w_ref_comp = m_ref_compressor * (h8s_for_work - h7) / max(compressor_eta_is, 1.0e-6)
         else:
-            h8s_for_work = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
+            h8s_for_work = props_si("H", "P", p_cond, "S", s7, self.ref_fluid)
             w_ref_comp = float(compressor_cfg.get("work_w", m_ref * (h8s_for_work - h7) / max(compressor_eta_is, 1.0e-6)))
-        h8s = float(PropsSI("H", "P", p_cond, "S", s7, self.ref_fluid))
+        h8s = props_si("H", "P", p_cond, "S", s7, self.ref_fluid)
         w_ref_isentropic = m_ref_compressor * (h8s - h7)
         h8 = h7 + w_ref_comp / max(m_ref_compressor, 1.0e-6)
-        t8_k = float(PropsSI("T", "P", p_cond, "H", h8, self.ref_fluid))
+        t8_k = props_si("T", "P", p_cond, "H", h8, self.ref_fluid)
         q_cond = evap_total + w_ref_comp
-        valve_inlet_density = float(PropsSI("D", "P", p_cond, "H", h9, self.ref_fluid))
+        valve_inlet_density = props_si("D", "P", p_cond, "H", h9, self.ref_fluid)
         if has_branch_valves:
             m_ref_valve_cascade = self._branch_valve_flow(cascade_valve_cfg, p_cond, p_evap, valve_inlet_density)
             m_ref_valve_dock = self._branch_valve_flow(dock_valve_cfg, p_cond, p_evap, valve_inlet_density)
@@ -1000,9 +999,9 @@ class CascadeSystemModel:
         m_dock = max(float(ref["m_ref_dock"]), 1.0e-12)
         h_mixed = (m_cascade * h_cascade + m_dock * h_dock) / max(m_cascade + m_dock, 1.0e-12)
 
-        t_cascade_k = float(PropsSI("T", "P", ref["p_evap"], "H", h_cascade, self.ref_fluid))
-        t_dock_k = float(PropsSI("T", "P", ref["p_evap"], "H", h_dock, self.ref_fluid))
-        t_mixed_k = float(PropsSI("T", "P", ref["p_evap"], "H", h_mixed, self.ref_fluid))
+        t_cascade_k = props_si("T", "P", ref["p_evap"], "H", h_cascade, self.ref_fluid)
+        t_dock_k = props_si("T", "P", ref["p_evap"], "H", h_dock, self.ref_fluid)
+        t_mixed_k = props_si("T", "P", ref["p_evap"], "H", h_mixed, self.ref_fluid)
         return {
             "superheat_k": t_mixed_k - tevap_k,
             "superheat_cascade_k": t_cascade_k - tevap_k,

@@ -142,11 +142,18 @@ def run_case_from_config_path(
     door_open_duration_s: float | None = None,
     run_version: str | int | None = None,
     jacobian_workers: int | None = None,
+    property_backend: str | None = None,
+    refprop_path: str | None = None,
 ) -> CaseResult:
     base_config = load_config(config_path)
     name, config = build_case_config(base_config, door_open_duration_s, run_version)
     if jacobian_workers is not None:
         config["simulation"]["jacobian_workers"] = max(1, int(jacobian_workers))
+    fluids_cfg = config.setdefault("fluids", {})
+    if property_backend is not None:
+        fluids_cfg["property_backend"] = property_backend
+    if refprop_path is not None:
+        fluids_cfg["refprop_path"] = refprop_path
     return run_case(config, name, door_open_duration_s)
 
 
@@ -157,17 +164,27 @@ def run_cases(
     workers: int = 1,
     run_version: str | int | None = None,
     jacobian_workers: int | None = None,
+    property_backend: str | None = None,
+    refprop_path: str | None = None,
 ) -> list[CaseResult]:
     if workers <= 1 or len(door_open_durations_s) <= 1:
         return [
-            run_case_from_config_path(config_path, duration, run_version, jacobian_workers)
+            run_case_from_config_path(config_path, duration, run_version, jacobian_workers, property_backend, refprop_path)
             for duration in door_open_durations_s
         ]
 
     results: list[CaseResult] = []
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(run_case_from_config_path, config_path, duration, run_version, jacobian_workers): duration
+            executor.submit(
+                run_case_from_config_path,
+                config_path,
+                duration,
+                run_version,
+                jacobian_workers,
+                property_backend,
+                refprop_path,
+            ): duration
             for duration in door_open_durations_s
         }
         for future in as_completed(futures):

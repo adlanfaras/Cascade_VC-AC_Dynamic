@@ -66,6 +66,26 @@ python -m src.cascade_dynamics.main --config config/paper_reference_case_dock_in
 python -m src.cascade_dynamics.main --config config/LD_Infiltration_Qvc100_Qld25_1.json
 ```
 
+## Property Backend
+
+The CLI uses CoolProp by default:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/RS_Infiltration_Qvc100_Qld25_8.json --property-backend coolprop
+```
+
+Use REFPROP for refrigerant properties with:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/RS_Infiltration_Qvc100_Qld25_8.json --property-backend refprop
+```
+
+The default REFPROP path is `C:\Program Files (x86)\REFPROP`. Override it if needed:
+
+```powershell
+python -m src.cascade_dynamics.main --config config/RS_Infiltration_Qvc100_Qld25_8.json --property-backend refprop --refprop-path "C:\Program Files (x86)\REFPROP"
+```
+
 ## Run Door-Duration Cases
 
 Run one modified door-open duration:

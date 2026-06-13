@@ -11,14 +11,13 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
-from CoolProp.CoolProp import PropsSI
 from scipy.optimize import least_squares
 
 from .control import get_path, set_path
 from .control import ControlSystem
 from .compressor_map import ammonia_compressor_map, volumetric_flow_from_head
 from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actual_enthalpy
-from .fluids import h_refrigerant_liquid, p_sat
+from .fluids import configure_property_backend_from_config, h_refrigerant_liquid, p_sat, props_si
 from .humid_air import humid_air_state, saturated_room_humidity_ratio, state_at_enthalpy, state_at_entropy
 from .model import (
     CP_DOCK_AIR,
@@ -891,8 +890,8 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
     p_cond = p_cond_from_tcond
     h9 = h_refrigerant_liquid(tcond_c + KELVIN_OFFSET - vcc_cfg["subcooling_k"], p_cond_from_tcond, ref_fluid, vcc_cfg["subcooling_k"])
     superheat_target_k = float(startup_cfg.get("superheat_target_k", 5.0))
-    h7_target = float(PropsSI("H", "T", tevap_c + KELVIN_OFFSET + superheat_target_k, "P", p_evap, ref_fluid))
-    s7_target = float(PropsSI("S", "P", p_evap, "H", h7_target, ref_fluid))
+    h7_target = props_si("H", "T", tevap_c + KELVIN_OFFSET + superheat_target_k, "P", p_evap, ref_fluid)
+    s7_target = props_si("S", "P", p_evap, "H", h7_target, ref_fluid)
     m_ref = q_evap_total / max(h7_target - h9, 1.0e-9)
 
     compressor_cfg = vcc_cfg["compressor"]
@@ -938,7 +937,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         if fixed_vcc_speed_rpm is not None:
             compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
         pressure_ratio = p_cond / max(p_evap, 1.0e-9)
-        suction_density = float(PropsSI("D", "P", p_evap, "H", h7_target, ref_fluid))
+        suction_density = props_si("D", "P", p_evap, "H", h7_target, ref_fluid)
         eta_v = compressor_volumetric_efficiency_clearance(
             pressure_ratio,
             float(compressor_cfg.get("clearance_factor", 0.05)),
@@ -957,7 +956,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         )
     else:
         eta_is = float(compressor_cfg.get("eta_is", 1.0))
-        h8s = float(PropsSI("H", "P", p_cond, "S", s7_target, ref_fluid))
+        h8s = props_si("H", "P", p_cond, "S", s7_target, ref_fluid)
         compressor_cfg["work_w"] = float(m_ref * (h8s - h7_target) / max(eta_is, 1.0e-6))
     m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref)
     q_total_for_split = max(q_evap_total, 1.0e-9)
@@ -972,7 +971,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
         "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
     }
-    valve_inlet_density = float(PropsSI("D", "P", p_cond, "H", h9, ref_fluid))
+    valve_inlet_density = props_si("D", "P", p_cond, "H", h9, ref_fluid)
     valve_flow_factor = expansion_valve_flow_factor(p_cond, p_evap, valve_inlet_density)
     for branch, (_, branch_m_ref) in branch_targets.items():
         valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
@@ -1384,6 +1383,7 @@ def solve_dynamic_step(
 
 def run_simulation(config: dict) -> list[dict[str, float]]:
     plant_config = deepcopy(config)
+    configure_property_backend_from_config(plant_config)
     sim_cfg = plant_config["simulation"]
     model = CascadeSystemModel(plant_config)
     progress_interval = int(sim_cfg.get("progress_interval_steps", 20))

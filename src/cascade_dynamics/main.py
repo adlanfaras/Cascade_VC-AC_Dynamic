@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .batch import CaseResult, apply_output_version, run_case_from_config_path, run_cases
 from .config import load_config
+from .fluids import DEFAULT_REFPROP_PATH
 from .simulation import run_simulation, save_csv, save_plot
 
 
@@ -81,6 +82,17 @@ def main() -> None:
         "--run-version",
         help="Append a stable version tag to output files, e.g. 2 creates *_2.csv and rerunning 2 overwrites it.",
     )
+    parser.add_argument(
+        "--property-backend",
+        choices=("coolprop", "refprop"),
+        default="coolprop",
+        help="Thermophysical property backend for the refrigerant cycle.",
+    )
+    parser.add_argument(
+        "--refprop-path",
+        default=DEFAULT_REFPROP_PATH,
+        help=f"REFPROP installation path used when --property-backend refprop. Default: {DEFAULT_REFPROP_PATH}",
+    )
     args = parser.parse_args()
 
     door_durations = _door_durations_from_args(args)
@@ -88,6 +100,9 @@ def main() -> None:
         cfg = load_config(args.config)
         if args.jacobian_workers is not None:
             cfg["simulation"]["jacobian_workers"] = max(1, args.jacobian_workers)
+        cfg.setdefault("fluids", {})["property_backend"] = args.property_backend
+        if args.property_backend == "refprop":
+            cfg["fluids"]["refprop_path"] = args.refprop_path
         apply_output_version(cfg, args.run_version)
         history = run_simulation(cfg)
         save_plot(history, cfg["output"]["plot_file"])
@@ -96,7 +111,14 @@ def main() -> None:
         return
 
     if len(door_durations) == 1:
-        result = run_case_from_config_path(args.config, door_durations[0], args.run_version, args.jacobian_workers)
+        result = run_case_from_config_path(
+            args.config,
+            door_durations[0],
+            args.run_version,
+            args.jacobian_workers,
+            args.property_backend,
+            args.refprop_path if args.property_backend == "refprop" else None,
+        )
         _print_case_result(result)
         return
 
@@ -113,6 +135,8 @@ def main() -> None:
         workers=workers,
         run_version=args.run_version,
         jacobian_workers=args.jacobian_workers,
+        property_backend=args.property_backend,
+        refprop_path=args.refprop_path if args.property_backend == "refprop" else None,
     )
     for result in results:
         _print_case_result(result)
