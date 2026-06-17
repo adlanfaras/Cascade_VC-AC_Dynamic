@@ -1,0 +1,100 @@
+{
+  "system": {
+    "mode": "vcc"
+  },
+  "simulation": {
+    "t_start_s": 0.0,
+    "t_end_s": 600.0,
+    "dt_s": 5.0,
+    "newton_tol": 1e-05,
+    "newton_max_iter": 80,
+    "fd_step": 1e-05,
+    "jacobian_scheme": "forward",
+    "startup_initialization": {
+      "enabled": true,
+      "targets": {
+        "sink_c": 35.0,
+        "tevap_c": -5.0,
+        "tcond_c": 40.0
+      },
+      "fixed_vcc_compressor_speed_rpm": 1450,
+      "superheat_target_k": 5.0
+    }
+  },
+  "fluids": {
+    "air": "Air",
+    "refrigerant": "Ammonia"
+  },
+  "vcc_cycle": {
+    "standalone": {
+      "evaporator_loads": {
+        "cascade_w": 43845.0,
+        "dock_w": 25750.0
+      }
+    },
+    "compressor": {
+      "model": "positive_displacement_clearance",
+      "eta_is_min": 0.4,
+      "eta_is_max": 0.95,
+      "clearance_factor": 0.05,
+      "polytropic_exponent": 1.25,
+      "eta_v_min": 0.3,
+      "eta_v_max": 1.0,
+      "startup_backcalculate_displacement": true,
+      "displacement_m3_per_rev": 0.0,
+      "pressure_ratio_min": 1.000001,
+      "pressure_ratio_max": 20.0,
+      "speed_rpm": 1450,
+      "speed_min_rpm": 1226.0,
+      "speed_max_rpm": 1610.0,
+      "check_range": false,
+      "eta_is_model": "ammonia_speed_temperature_map"
+    },
+    "condenser_ua_w_k": 18000.0,
+    "subcooling_k": 0.0,
+    "receiver": {
+      "enabled": true,
+      "initial_residence_time_s": 5.0,
+      "initial_liquid_fill_fraction": 0.5,
+      "inlet_time_constant_s": 5.0,
+      "minimum_liquid_fill_fraction": 0.02,
+      "starvation_smoothing_fill_fraction": 0.05,
+      "limit_valve_flow_when_starved": true,
+      "model_vapor_feed_when_empty": true
+    },
+    "branch_holdup": {
+      "outlet_enthalpy_time_constant_s": 5.0
+    },
+    "expansion_valves": {
+      "cascade": {
+        "opening": 0.375
+      },
+      "dock": {
+        "opening": 0.125
+      }
+    }
+  },
+  "thermal_masses": {
+    "sink_capacitance_j_k": 500000.0
+  },
+  "boundary_conditions": {
+    "ambient_c": 30.0,
+    "load_step_time_s": 600.0,
+    "sink_m_dot_kg_s": 6.2,
+    "sink_cp_j_kg_k": 4180.0
+  },
+  "control": {
+    "enabled": false,
+    "controllers": []
+  },
+  "initial_guess": {
+    "sink_c": 35.0,
+    "tevap_c": -5.0,
+    "tcond_c": 40.0,
+    "m_ref_kg_s": 0.095625
+  },
+  "output": {
+    "plot_file": "outputs/validation_vcc_fixed_load.png",
+    "csv_file": "outputs/validation_vcc_fixed_load.csv"
+  }
+}

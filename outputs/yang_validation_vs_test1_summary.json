@@ -1,0 +1,53 @@
+{
+  "experimental_points": 74,
+  "experimental_time_min_min": 2.0308503216804894,
+  "experimental_time_min_max": 119.67661421595224,
+  "experimental_temp_k_first": 260.438847235239,
+  "experimental_temp_k_last": 105.21175633591062,
+  "simulation_final_refrigerating_temperature_k": 105.48860996980235,
+  "simulation_final_room_k": 105.48860996980235,
+  "simulation_final_t5_k": 92.0789679104928,
+  "candidate_metrics": {
+    "refrigerating_temperature_k": {
+      "mean_error_k": 2.4509511548374983,
+      "mean_abs_error_k": 2.764283026810012,
+      "rmse_k": 5.4876620314501885,
+      "max_abs_error_k": 18.983028042095896,
+      "start_error_k": 18.983028042095896,
+      "end_error_k": 0.28202305441595854
+    },
+    "room_k": {
+      "mean_error_k": 2.4509511548374983,
+      "mean_abs_error_k": 2.764283026810012,
+      "rmse_k": 5.4876620314501885,
+      "max_abs_error_k": 18.983028042095896,
+      "start_error_k": 18.983028042095896,
+      "end_error_k": 0.28202305441595854
+    },
+    "t5_k": {
+      "mean_error_k": -19.773696605141517,
+      "mean_abs_error_k": 19.773696605141517,
+      "rmse_k": 21.472361559481786,
+      "max_abs_error_k": 47.99747174920424,
+      "start_error_k": -43.46178788309862,
+      "end_error_k": -13.129060844112573
+    },
+    "t4_k": {
+      "mean_error_k": 15.32509904423292,
+      "mean_abs_error_k": 15.32509904423292,
+      "rmse_k": 15.509238376405964,
+      "max_abs_error_k": 23.26619882215215,
+      "start_error_k": 22.87389141324303,
+      "end_error_k": 15.023077876364638
+    },
+    "t6_k": {
+      "mean_error_k": 147.2527772821058,
+      "mean_abs_error_k": 147.2527772821058,
+      "rmse_k": 151.95664377077543,
+      "max_abs_error_k": 174.53532347091027,
+      "start_error_k": 33.73965183143872,
+      "end_error_k": 173.80628431074226
+    }
+  },
+  "output_csv": "outputs\\yang_validation_vs_test1_residuals.csv"
+}

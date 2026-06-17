@@ -23,7 +23,7 @@
       "cascade_air_evap_min_delta_t_c": 10.0,
       "regenerator_effectiveness": 0.9,
       "target_vcc_cooling_capacity_w": 103000.0,
-      "fixed_vcc_compressor_speed_rpm": 1533.0,
+      "fixed_vcc_compressor_speed_rpm": 1450.0,
       "superheat_target_k": 5.0,
       "free_state_variables": [
         "room_c",
@@ -119,8 +119,7 @@
   "vcc_cycle": {
     "compressor": {
       "model": "positive_displacement_clearance",
-      "eta_is": 0.85,
-      "fit_eta_is_from_startup": false,
+      "eta_is_model": "ammonia_speed_temperature_map",
       "eta_is_min": 0.4,
       "eta_is_max": 0.95,
       "clearance_factor": 0.05,
@@ -131,7 +130,7 @@
       "displacement_m3_per_rev": 0.0014959132890505532,
       "pressure_ratio_min": 1.000001,
       "pressure_ratio_max": 20.0,
-      "speed_rpm": 1533.0,
+      "speed_rpm": 1450.0,
       "speed_min_rpm": 1226.0,
       "speed_max_rpm": 1610.0,
       "check_range": false

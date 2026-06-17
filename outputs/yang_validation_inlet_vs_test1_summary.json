@@ -1,0 +1,16 @@
+{
+  "trace": "expander_inlet",
+  "experiment_file": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv",
+  "model_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation.csv",
+  "model_column": "t4_k",
+  "n_points": 76,
+  "time_min_first": 2.1463230978772394,
+  "time_min_last": 119.67661421595224,
+  "rmse_k": 3.732981742349271,
+  "mae_k": 3.2078180729453596,
+  "mean_error_k": -3.0294545971036935,
+  "max_abs_error_k": 10.785524434388293,
+  "final_experiment_k": 136.6490818298969,
+  "final_model_k": 133.9621692183569,
+  "final_error_k": -2.686912611539981
+}

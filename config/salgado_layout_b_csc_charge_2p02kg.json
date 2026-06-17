@@ -1,0 +1,102 @@
+{
+  "system": {
+    "mode": "vcc"
+  },
+  "simulation": {
+    "t_start_s": 0.0,
+    "t_end_s": 0.0,
+    "dt_s": 5.0,
+    "newton_tol": 1e-05,
+    "newton_max_iter": 80,
+    "fd_step": 1e-05,
+    "jacobian_scheme": "forward",
+    "startup_initialization": {
+      "enabled": true,
+      "targets": {
+        "sink_c": 39.7,
+        "tevap_c": 7.324,
+        "tcond_c": 37.7552
+      },
+      "fixed_vcc_compressor_speed_rpm": 2400.0,
+      "superheat_target_k": 6.1
+    }
+  },
+  "fluids": {
+    "air": "Air",
+    "refrigerant": "Ammonia",
+    "property_backend": "coolprop"
+  },
+  "vcc_cycle": {
+    "layout": "csc",
+    "standalone": {
+      "evaporator_loads": {
+        "cascade_w": 31500.0,
+        "dock_w": 0.0
+      }
+    },
+    "compressor": {
+      "model": "positive_displacement_clearance",
+      "eta_is": 0.65,
+      "clearance_factor": 0.05,
+      "polytropic_exponent": 1.25,
+      "eta_v_min": 0.3,
+      "eta_v_max": 0.81233,
+      "startup_backcalculate_displacement": false,
+      "displacement_m3_per_rev": 0.00019444444444444443,
+      "speed_rpm": 2400.0
+    },
+    "condenser_ua_w_k": 19000.0,
+    "subcooling_k": 9.8,
+    "subcooler": {
+      "enabled": true
+    },
+    "branch_holdup": {
+      "outlet_enthalpy_time_constant_s": 0.0
+    },
+    "expansion_valves": {
+      "cascade": {
+        "opening": 0.5
+      },
+      "dock": {
+        "opening": 0.05
+      }
+    }
+  },
+  "thermal_masses": {
+    "sink_capacitance_j_k": 500000.0
+  },
+  "boundary_conditions": {
+    "ambient_c": 15.7,
+    "load_step_time_s": 600.0,
+    "sink_m_dot_kg_s": 0.361,
+    "sink_cp_j_kg_k": 4180.0
+  },
+  "control": {
+    "enabled": false,
+    "controllers": []
+  },
+  "initial_guess": {
+    "sink_c": 39.7,
+    "tevap_c": 7.324,
+    "tcond_c": 37.7552,
+    "m_ref_kg_s": 0.0272
+  },
+  "validation_reference": {
+    "source": "Salgado thesis Tables 3.11, 3.12, 3.13, 3.14",
+    "layout": "B condenser subcooler",
+    "frequency_hz": 40.0,
+    "charge_kg": 2.02,
+    "p_evap_bar": 5.6,
+    "p_cond_bar": 14.6,
+    "superheat_k": 6.1,
+    "subcooling_k": 9.8,
+    "m_ref_kg_s": 0.0272,
+    "q_evap_w": 31500.0,
+    "q_condenser_w": 13400.0,
+    "q_subcooler_w": 22800.0
+  },
+  "output": {
+    "plot_file": "outputs/salgado_layout_b_csc_charge_2p02kg.png",
+    "csv_file": "outputs/salgado_layout_b_csc_charge_2p02kg.csv"
+  }
+}

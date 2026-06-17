@@ -6,11 +6,11 @@ from CoolProp.CoolProp import ALTERNATIVE_REFPROP_PATH, PropsSI, set_config_stri
 
 
 DEFAULT_REFPROP_PATH = r"C:\Program Files (x86)\REFPROP"
-_BACKEND = "coolprop"
+_BACKEND = "refprop"
 _REFPROP_PATH = DEFAULT_REFPROP_PATH
 
 
-def configure_property_backend(backend: str = "coolprop", refprop_path: str | None = None) -> None:
+def configure_property_backend(backend: str = "refprop", refprop_path: str | None = None) -> None:
     global _BACKEND, _REFPROP_PATH
 
     normalized = str(backend).strip().lower()
@@ -26,7 +26,7 @@ def configure_property_backend(backend: str = "coolprop", refprop_path: str | No
 
 def configure_property_backend_from_config(config: dict) -> None:
     fluids_cfg = config.get("fluids", {})
-    backend = fluids_cfg.get("property_backend", fluids_cfg.get("backend", "coolprop"))
+    backend = fluids_cfg.get("property_backend", fluids_cfg.get("backend", "refprop"))
     refprop_path = fluids_cfg.get("refprop_path")
     configure_property_backend(str(backend), None if refprop_path is None else str(refprop_path))
 

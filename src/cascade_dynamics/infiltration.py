@@ -389,6 +389,50 @@ def door_open_fraction(cfg: dict[str, Any], time_s: float) -> float:
     return float(np.clip(fraction, 0.0, 1.0))
 
 
+def _event_start_allowed(event: DoorEvent, index: int, t_open_s: float) -> bool:
+    if event.interval_s is None or event.interval_s <= 0.0:
+        return index == 0
+    return _event_start_is_repeated(event, index, t_open_s)
+
+
+def scheduled_door_event_starts_between(cfg: dict[str, Any], start_s: float, end_s: float) -> list[float]:
+    start = float(start_s)
+    end = float(end_s)
+    if end < start:
+        start, end = end, start
+
+    starts: list[float] = []
+    for event in _door_events(cfg):
+        if event.interval_s is None or event.interval_s <= 0.0:
+            if start <= event.t_open_s <= end:
+                starts.append(event.t_open_s)
+            continue
+
+        interval_s = max(float(event.interval_s), 1.0e-9)
+        first_index = max(0, int(math.ceil((start - event.t_open_s) / interval_s)))
+        last_index = int(math.floor((end - event.t_open_s) / interval_s))
+        for index in range(first_index, last_index + 1):
+            t_open = event.t_open_s + index * interval_s
+            if start <= t_open <= end and _event_start_allowed(event, index, t_open):
+                starts.append(t_open)
+
+    return sorted(starts)
+
+
+def scheduled_precool_fraction(cfg: dict[str, Any], time_s: float, lead_time_s: float) -> float:
+    lead_s = max(float(lead_time_s), 0.0)
+    if lead_s <= 0.0:
+        return 0.0
+
+    time = float(time_s)
+    if door_open_fraction(cfg, time) > 0.0:
+        return 0.0
+    for t_open in scheduled_door_event_starts_between(cfg, time, time + lead_s):
+        if t_open - lead_s <= time < t_open:
+            return 1.0
+    return 0.0
+
+
 def tian_geometry(cfg: dict[str, Any], opening_fraction: float) -> dict[str, float]:
     door = cfg.get("door", {})
     indoor_source = str(cfg.get("indoor_source", "room")).lower()

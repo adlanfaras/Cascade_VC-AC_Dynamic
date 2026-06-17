@@ -6,11 +6,102 @@ import numpy as np
 
 
 GRAVITY_M_S2 = 9.80665
+AMMONIA_DESIGN_SPEED_RPM = 1450.0
 AMMONIA_MAP_BASE_RPM = 1533.0
 AMMONIA_MAP_VALIDITY = {
     "to_K": (248.45, 268.30),
     "tc_K": (283.15, 319.85),
     "N_rpm": (1226.0, 1610.0),
+}
+AMMONIA_ETA_IS_COEFFS_BY_SPEED = {
+    1226.0: np.array(
+        [
+            +6.00471725e-01,
+            +1.43629073e-02,
+            +1.29304633e-02,
+            +8.05894049e-04,
+            -4.81910100e-04,
+            -3.79477563e-04,
+            +1.73999281e-05,
+            -1.75037004e-05,
+            +5.28832918e-06,
+            +4.28383471e-06,
+        ],
+        dtype=float,
+    ),
+    1380.0: np.array(
+        [
+            +5.90125311e-01,
+            +1.41154276e-02,
+            +1.27076653e-02,
+            +7.92008111e-04,
+            -4.73606559e-04,
+            -3.72938983e-04,
+            +1.71001190e-05,
+            -1.72021033e-05,
+            +5.19720875e-06,
+            +4.21002220e-06,
+        ],
+        dtype=float,
+    ),
+    1450.0: np.array(
+        [
+            +5.88298295e-01,
+            +1.33876634e-02,
+            +1.28464797e-02,
+            +9.65787260e-04,
+            -5.10823388e-04,
+            -3.80564015e-04,
+            +2.10351573e-05,
+            -1.98164010e-05,
+            +4.57552889e-06,
+            +4.21170077e-06,
+        ],
+        dtype=float,
+    ),
+    1533.0: np.array(
+        [
+            +5.83747534e-01,
+            +1.39628752e-02,
+            +1.25703272e-02,
+            +7.83448486e-04,
+            -4.68488058e-04,
+            -3.68908447e-04,
+            +1.69153096e-05,
+            -1.70161916e-05,
+            +5.14103993e-06,
+            +4.16452240e-06,
+        ],
+        dtype=float,
+    ),
+    1610.0: np.array(
+        [
+            +5.81269028e-01,
+            +1.39035908e-02,
+            +1.25169554e-02,
+            +7.80122079e-04,
+            -4.66498927e-04,
+            -3.67342116e-04,
+            +1.68434897e-05,
+            -1.69439434e-05,
+            +5.11921183e-06,
+            +4.14684045e-06,
+        ],
+        dtype=float,
+    ),
+}
+AMMONIA_ETA_IS_MAP_MODEL_KEYS = {
+    "ammonia_speed_temperature_map",
+    "ammonia_temperature_speed_map",
+    "temperature_speed_map",
+    "speed_temperature_map",
+    "w6fa_k",
+    "w6fa-k",
+}
+AMMONIA_ETA_IS_MAP_DEFAULT_COMPRESSOR_MODELS = {
+    "bitzer_variable_speed_map",
+    "positive_displacement",
+    "positive_displacement_clearance",
 }
 AMMONIA_MAP_COEFFS = {
     "Q_W": np.array(
@@ -71,6 +162,137 @@ AIR_SPEED_MAP_COEFFS = np.array(
     dtype=float,
 )
 
+SCREW_COMPRESSOR_PRESSURE_RATIO_MAPS = {
+    "bitzer_osha7462_k": {
+        "eta_is": np.array(
+            [
+                -3.92418411637886e-05,
+                0.00132850293470606,
+                -0.0193898289608219,
+                0.159211256716007,
+                -0.803277241986796,
+                2.54157559658706,
+                -4.87121586370778,
+                4.92463412304845,
+                -1.29576885262718,
+                -0.478402112038831,
+            ],
+            dtype=float,
+        ),
+        "eta_v": np.array(
+            [
+                -0.000173078864724056,
+                0.00609488229391194,
+                -0.0936530257687498,
+                0.823626596292584,
+                -4.56651253182123,
+                16.5479622153459,
+                -39.1798530118588,
+                58.3877587054447,
+                -49.5700805110219,
+                19.1273696006651,
+            ],
+            dtype=float,
+        ),
+    },
+    "gea_eb_7a": {
+        "eta_is": np.array(
+            [
+                7.66113516861610e-06,
+                -0.000382995806573727,
+                0.00834327978126302,
+                -0.103936608874655,
+                0.816071552689831,
+                -4.18899520696980,
+                14.0591756760594,
+                -29.7365333030147,
+                35.8912273800920,
+                -18.0782466771976,
+            ],
+            dtype=float,
+        ),
+        "eta_v": np.array(
+            [
+                1.77007940055443e-08,
+                2.15207453721211e-05,
+                -0.000949649768192743,
+                0.0174573946330176,
+                -0.175663642821483,
+                1.05512094002713,
+                -3.85578494048443,
+                8.33259789178359,
+                -9.72273276117756,
+                5.42732524309467,
+            ],
+            dtype=float,
+        ),
+        "q_oil_w": np.array(
+            [
+                -1.73919660445200,
+                69.7005444718232,
+                -1136.26615172586,
+                9465.99290463031,
+                -39620.6336923191,
+                45462.5229525469,
+                278845.479856449,
+                -1251750.57763334,
+                2028055.63832486,
+                -1195802.22242165,
+            ],
+            dtype=float,
+        ),
+    },
+}
+
+SCREW_COMPRESSOR_PRESET_ALIASES = {
+    "bitzer": "bitzer_osha7462_k",
+    "bitzer_osha7462-k": "bitzer_osha7462_k",
+    "bitzer_osha7462_k": "bitzer_osha7462_k",
+    "osha7462": "bitzer_osha7462_k",
+    "osha7462-k": "bitzer_osha7462_k",
+    "osha7462_k": "bitzer_osha7462_k",
+    "gea": "gea_eb_7a",
+    "gea_eb-7a": "gea_eb_7a",
+    "gea_eb_7a": "gea_eb_7a",
+    "eb-7a": "gea_eb_7a",
+    "eb_7a": "gea_eb_7a",
+}
+
+
+def pressure_ratio_polynomial(coefficients: list[float] | np.ndarray, pressure_ratio: float) -> float:
+    value = 0.0
+    for coefficient in coefficients:
+        value = value * float(pressure_ratio) + float(coefficient)
+    return float(value)
+
+
+def screw_compressor_pressure_ratio_map(config: dict[str, Any], pressure_ratio: float) -> dict[str, float]:
+    preset_name = str(config.get("preset", config.get("map_preset", ""))).strip().lower()
+    preset_key = SCREW_COMPRESSOR_PRESET_ALIASES.get(preset_name, preset_name)
+    preset = SCREW_COMPRESSOR_PRESSURE_RATIO_MAPS.get(preset_key, {})
+
+    eta_is_coeffs = config.get("eta_is_coefficients", preset.get("eta_is"))
+    eta_v_coeffs = config.get("eta_v_coefficients", config.get("volumetric_efficiency_coefficients", preset.get("eta_v")))
+    q_oil_coeffs = config.get("q_oil_coefficients", preset.get("q_oil_w"))
+
+    eta_is = float(config.get("eta_is", 1.0))
+    eta_v = float(config.get("eta_v", config.get("volumetric_efficiency", 1.0)))
+    q_oil_w = 0.0
+    if eta_is_coeffs is not None:
+        eta_is = pressure_ratio_polynomial(eta_is_coeffs, pressure_ratio)
+    if eta_v_coeffs is not None:
+        eta_v = pressure_ratio_polynomial(eta_v_coeffs, pressure_ratio)
+    if q_oil_coeffs is not None:
+        q_oil_w = pressure_ratio_polynomial(q_oil_coeffs, pressure_ratio)
+
+    eta_is = float(np.clip(eta_is, float(config.get("eta_is_min", 0.05)), float(config.get("eta_is_max", 1.0))))
+    eta_v = float(np.clip(eta_v, float(config.get("eta_v_min", 0.05)), float(config.get("eta_v_max", 1.2))))
+    return {
+        "eta_is": eta_is,
+        "eta_v": eta_v,
+        "q_oil_w": q_oil_w,
+    }
+
 
 def _ammonia_map_basis(to_c: np.ndarray, tc_c: np.ndarray) -> np.ndarray:
     return np.stack(
@@ -88,6 +310,93 @@ def _ammonia_map_basis(to_c: np.ndarray, tc_c: np.ndarray) -> np.ndarray:
         ],
         axis=-1,
     )
+
+
+def ammonia_isentropic_efficiency_map(
+    tc_k: float,
+    to_k: float,
+    speed_rpm: float,
+    check_range: bool = True,
+    eta_min: float = 0.05,
+    eta_max: float = 1.0,
+) -> float:
+    tc = float(tc_k)
+    to = float(to_k)
+    speed = float(speed_rpm)
+    if check_range:
+        for key, value in (
+            ("to_K", to),
+            ("tc_K", tc),
+            ("N_rpm", speed),
+        ):
+            lo, hi = AMMONIA_MAP_VALIDITY[key]
+            if value < lo or value > hi:
+                raise ValueError(f"{key} outside valid range {lo} to {hi}")
+
+    speeds = sorted(AMMONIA_ETA_IS_COEFFS_BY_SPEED)
+    speed_eval = float(np.clip(speed, speeds[0], speeds[-1]))
+    if speed_eval <= speeds[0]:
+        coefficients = AMMONIA_ETA_IS_COEFFS_BY_SPEED[speeds[0]]
+    elif speed_eval >= speeds[-1]:
+        coefficients = AMMONIA_ETA_IS_COEFFS_BY_SPEED[speeds[-1]]
+    else:
+        coefficients = AMMONIA_ETA_IS_COEFFS_BY_SPEED[speeds[-1]]
+        for idx in range(len(speeds) - 1):
+            speed_lo = speeds[idx]
+            speed_hi = speeds[idx + 1]
+            if speed_lo <= speed_eval < speed_hi:
+                weight = (speed_eval - speed_lo) / (speed_hi - speed_lo)
+                coefficients = (
+                    (1.0 - weight) * AMMONIA_ETA_IS_COEFFS_BY_SPEED[speed_lo]
+                    + weight * AMMONIA_ETA_IS_COEFFS_BY_SPEED[speed_hi]
+                )
+                break
+
+    basis = _ammonia_map_basis(np.asarray(to - 273.15), np.asarray(tc - 273.15))
+    eta_is = float(np.dot(coefficients, basis))
+    return float(np.clip(eta_is, float(eta_min), float(eta_max)))
+
+
+def _is_ammonia_fluid(fluid_name: str) -> bool:
+    key = str(fluid_name).strip().lower().replace("-", "").replace("_", "")
+    return key in {"ammonia", "nh3", "r717"}
+
+
+def compressor_uses_ammonia_eta_is_map(config: dict[str, Any], fluid_name: str) -> bool:
+    eta_model = str(config.get("eta_is_model", config.get("isentropic_efficiency_model", ""))).strip().lower()
+    eta_model = eta_model.replace(" ", "_")
+    if eta_model in AMMONIA_ETA_IS_MAP_MODEL_KEYS:
+        return True
+    if eta_model in {"constant", "fixed", "scalar", "fixed_scalar"}:
+        return False
+
+    compressor_model = str(config.get("model", "")).strip().lower()
+    if not _is_ammonia_fluid(fluid_name) or compressor_model not in AMMONIA_ETA_IS_MAP_DEFAULT_COMPRESSOR_MODELS:
+        return False
+    return "eta_is" not in config
+
+
+def ammonia_compressor_eta_is(
+    config: dict[str, Any],
+    tc_k: float,
+    to_k: float,
+    speed_rpm: float,
+    fluid_name: str,
+    fallback: float = 1.0,
+) -> float:
+    if compressor_uses_ammonia_eta_is_map(config, fluid_name):
+        speed = float(speed_rpm)
+        if speed <= 0.0:
+            speed = float(config.get("speed_rpm", config.get("design_speed_rpm", AMMONIA_DESIGN_SPEED_RPM)))
+        return ammonia_isentropic_efficiency_map(
+            tc_k,
+            to_k,
+            speed,
+            check_range=bool(config.get("check_range", False)),
+            eta_min=float(config.get("eta_is_min", 0.05)),
+            eta_max=float(config.get("eta_is_max", 1.0)),
+        )
+    return float(config.get("eta_is", fallback))
 
 
 def ammonia_compressor_map(tc_k: float, to_k: float, speed_rpm: float, check_range: bool = True) -> dict[str, float]:
@@ -117,6 +426,7 @@ def ammonia_compressor_map(tc_k: float, to_k: float, speed_rpm: float, check_ran
         c = np.einsum("ij,...j->...i", coeffs, speed_terms)
         outputs[name] = float(np.einsum("...i,...i->...", c, basis))
     outputs["COP"] = outputs["Q_W"] / max(outputs["P_W"], 1.0e-9)
+    outputs["eta_is"] = ammonia_isentropic_efficiency_map(tc_k, to_k, speed_rpm, check_range=False)
     return outputs
 
 
@@ -204,7 +514,7 @@ def _speed_map_head_from_volumetric_flow(config: dict[str, Any], target_q_m3_s: 
     return float(np.clip(1000.0 * h_solution, head_min_m, head_max_m))
 
 
-def mass_flow_from_isentropic_head(
+def mass_flow_from_actual_head(
     config: dict[str, Any],
     head_j_kg: float,
     suction_density_kg_m3: float | None = None,
@@ -218,6 +528,14 @@ def mass_flow_from_isentropic_head(
     mass_flow = max(float(config.get("m_dot_min_kg_s", 0.0)), mass_flow)
     mass_flow = min(float(config.get("m_dot_max_kg_s", 1.0e9)), mass_flow)
     return mass_flow
+
+
+def mass_flow_from_isentropic_head(
+    config: dict[str, Any],
+    head_j_kg: float,
+    suction_density_kg_m3: float | None = None,
+) -> float:
+    return mass_flow_from_actual_head(config, head_j_kg, suction_density_kg_m3)
 
 
 def head_from_mass_flow(

@@ -15,8 +15,14 @@ from scipy.optimize import least_squares
 
 from .control import get_path, set_path
 from .control import ControlSystem
-from .compressor_map import ammonia_compressor_map, volumetric_flow_from_head
-from .components import compressor_actual_enthalpy, positive_lmtd, turbine_actual_enthalpy
+from .compressor_map import (
+    ammonia_compressor_eta_is,
+    ammonia_compressor_map,
+    compressor_uses_ammonia_eta_is_map,
+    screw_compressor_pressure_ratio_map,
+    volumetric_flow_from_head,
+)
+from .components import positive_lmtd, turbine_actual_enthalpy
 from .fluids import configure_property_backend_from_config, h_refrigerant_liquid, p_sat, props_si
 from .humid_air import humid_air_state, saturated_room_humidity_ratio, state_at_enthalpy, state_at_entropy
 from .model import (
@@ -34,7 +40,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 20
+STARTUP_CACHE_VERSION = 23
 
 STATE_INDEX = {
     "room_c": 0,
@@ -47,6 +53,14 @@ STATE_INDEX = {
     "m_ref_cascade_kg_s": 7,
     "m_ref_dock_kg_s": 8,
     "dock_c": 9,
+    "receiver_mass_kg": 10,
+}
+
+SUPPORTED_SYSTEM_MODES = {"cascade", "air_cycle", "air", "vcc", "vapor_compression"}
+SCREW_PRESSURE_RATIO_COMPRESSOR_MODELS = {
+    "screw_pressure_ratio_polynomial",
+    "screw_polynomial",
+    "pressure_ratio_polynomial_screw",
 }
 
 DEFAULT_STARTUP_FREE_PARAMETERS = [
@@ -78,6 +92,8 @@ PAPER_DESIGN_SOLVED_PATHS = [
     "vcc_cycle.expansion_valves.cascade.flow_coefficient_m2",
     "vcc_cycle.expansion_valves.dock.opening",
     "vcc_cycle.expansion_valves.dock.flow_coefficient_m2",
+    "vcc_cycle.receiver.volume_m3",
+    "vcc_cycle.receiver.initial_mass_kg",
     "boundary_conditions.load_before_w",
     "boundary_conditions.load_after_w",
     "boundary_conditions.sink_m_dot_kg_s",
@@ -96,6 +112,169 @@ class StartupInitializationResult:
 
 def _log(message: str) -> None:
     print(message, flush=True)
+
+
+def _receiver_config(config: dict[str, Any]) -> dict[str, Any]:
+    vcc_cfg = config.get("vcc_cycle", {})
+    receiver_cfg = vcc_cfg.get("receiver")
+    if isinstance(receiver_cfg, dict):
+        return receiver_cfg
+    receiver_cfg = vcc_cfg.get("high_pressure_receiver")
+    if isinstance(receiver_cfg, dict):
+        return receiver_cfg
+    return {}
+
+
+def _vcc_layout(config: dict[str, Any]) -> str:
+    vcc_cfg = config.get("vcc_cycle", {})
+    layout = vcc_cfg.get("layout", vcc_cfg.get("configuration", vcc_cfg.get("cycle_layout", "")))
+    return str(layout or "").strip().lower()
+
+
+def _receiver_enabled(config: dict[str, Any]) -> bool:
+    return bool(_receiver_config(config).get("enabled", False)) or _vcc_layout(config) in {"hpr", "high_pressure_receiver"}
+
+
+def _low_pressure_receiver_config(config: dict[str, Any]) -> dict[str, Any]:
+    vcc_cfg = config.get("vcc_cycle", {})
+    receiver_cfg = vcc_cfg.get("low_pressure_receiver", vcc_cfg.get("lpr", {}))
+    return receiver_cfg if isinstance(receiver_cfg, dict) else {}
+
+
+def _low_pressure_receiver_enabled(config: dict[str, Any]) -> bool:
+    return bool(_low_pressure_receiver_config(config).get("enabled", False)) or _vcc_layout(config) in {
+        "lpr",
+        "low_pressure_receiver",
+    }
+
+
+def _vcc_evaporators_are_series(config: dict[str, Any]) -> bool:
+    vcc_cfg = config.get("vcc_cycle", {})
+    lpr_cfg = _low_pressure_receiver_config(config)
+    arrangement = vcc_cfg.get(
+        "evaporator_arrangement",
+        vcc_cfg.get(
+            "evaporator_topology",
+            lpr_cfg.get("evaporator_arrangement", lpr_cfg.get("evaporator_topology", "")),
+        ),
+    )
+    arrangement_key = str(arrangement or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return arrangement_key in {
+        "series",
+        "series_dock_cascade",
+        "dock_cascade_series",
+        "dock_then_cascade",
+        "exp_dock_cascade",
+        "expansion_dock_cascade",
+    }
+
+
+def _effective_refrigerant_mass_flow(config: dict[str, Any], m_ref_cascade: float, m_ref_dock: float) -> float:
+    if _vcc_evaporators_are_series(config):
+        return 0.5 * (max(float(m_ref_cascade), 0.0) + max(float(m_ref_dock), 0.0))
+    return max(float(m_ref_cascade), 0.0) + max(float(m_ref_dock), 0.0)
+
+
+def _compressor_uses_saturated_suction(config: dict[str, Any]) -> bool:
+    return _low_pressure_receiver_enabled(config) and bool(
+        _low_pressure_receiver_config(config).get("force_saturated_suction", True)
+    )
+
+
+def _lpr_subcooling_control_enabled(config: dict[str, Any]) -> bool:
+    receiver_cfg = _low_pressure_receiver_config(config)
+    return _low_pressure_receiver_enabled(config) and bool(
+        receiver_cfg.get("control_subcooling_with_eev", receiver_cfg.get("dynamic_subcooling", False))
+    )
+
+
+def _lpr_initial_subcooling_k(config: dict[str, Any]) -> float:
+    receiver_cfg = _low_pressure_receiver_config(config)
+    guess = config.get("initial_guess", {})
+    return max(
+        float(
+            guess.get(
+                "subcooling_k",
+                receiver_cfg.get(
+                    "initial_subcooling_k",
+                    receiver_cfg.get(
+                        "subcooling_setpoint_k",
+                        receiver_cfg.get("target_subcooling_k", config.get("vcc_cycle", {}).get("subcooling_k", 0.0)),
+                    ),
+                ),
+            )
+        ),
+        0.0,
+    )
+
+
+def _receiver_initial_mass_kg(config: dict[str, Any]) -> float:
+    receiver_cfg = _receiver_config(config)
+    guess = config.get("initial_guess", {})
+    return max(
+        float(
+            guess.get(
+                "receiver_mass_kg",
+                receiver_cfg.get("initial_mass_kg", receiver_cfg.get("mass_kg", 0.0)),
+            )
+        ),
+        0.0,
+    )
+
+
+def _configure_receiver_defaults(config: dict[str, Any]) -> None:
+    if not _receiver_enabled(config):
+        return
+
+    receiver_cfg = _receiver_config(config)
+    guess = config.setdefault("initial_guess", {})
+    ref_fluid = config.get("fluids", {}).get("refrigerant", "Ammonia")
+    startup_targets = config.get("simulation", {}).get("startup_initialization", {}).get("targets", {})
+    tcond_c = float(startup_targets.get("tcond_c", guess.get("tcond_c", 40.0)))
+    tcond_k = tcond_c + KELVIN_OFFSET
+    rho_l = props_si("D", "T", tcond_k, "Q", 0.0, ref_fluid)
+    rho_v = props_si("D", "T", tcond_k, "Q", 1.0, ref_fluid)
+    initial_fill = float(receiver_cfg.get("initial_liquid_fill_fraction", 0.5))
+    initial_fill = float(np.clip(initial_fill, 0.0, 1.0))
+    mixture_density = rho_v + initial_fill * (rho_l - rho_v)
+
+    has_mass = "receiver_mass_kg" in guess or "initial_mass_kg" in receiver_cfg or "mass_kg" in receiver_cfg
+    has_volume = "volume_m3" in receiver_cfg or "internal_volume_m3" in receiver_cfg
+    if has_mass:
+        initial_mass = _receiver_initial_mass_kg(config)
+    elif has_volume:
+        volume = max(float(receiver_cfg.get("volume_m3", receiver_cfg.get("internal_volume_m3", 0.0))), 0.0)
+        initial_mass = volume * max(mixture_density, 1.0e-9)
+    else:
+        residence_s = float(receiver_cfg.get("initial_residence_time_s", receiver_cfg.get("residence_time_s", 5.0)))
+        initial_mass = max(float(guess.get("m_ref_kg_s", 0.1)), 1.0e-6) * max(residence_s, 0.0)
+
+    initial_mass = max(float(initial_mass), 0.0)
+    receiver_cfg["initial_mass_kg"] = initial_mass
+    guess["receiver_mass_kg"] = initial_mass
+
+    if not has_volume:
+        volume = initial_mass / max(mixture_density, 1.0e-9)
+        receiver_cfg["volume_m3"] = max(volume, 1.0e-9)
+        receiver_cfg["auto_sized_volume_m3"] = receiver_cfg["volume_m3"]
+
+
+def _configure_lpr_subcooling_defaults(config: dict[str, Any]) -> None:
+    if not _lpr_subcooling_control_enabled(config):
+        return
+    receiver_cfg = _low_pressure_receiver_config(config)
+    guess = config.setdefault("initial_guess", {})
+    target = max(
+        float(
+            receiver_cfg.get(
+                "subcooling_setpoint_k",
+                receiver_cfg.get("target_subcooling_k", config.get("vcc_cycle", {}).get("subcooling_k", 0.0)),
+            )
+        ),
+        0.0,
+    )
+    receiver_cfg.setdefault("initial_subcooling_k", target)
+    guess.setdefault("subcooling_k", receiver_cfg["initial_subcooling_k"])
 
 
 def _path_exists(data: dict[str, Any], path: str) -> bool:
@@ -134,24 +313,190 @@ def initial_vector(config: dict) -> np.ndarray:
     guess = config["initial_guess"]
     m_ref_total = float(guess["m_ref_kg_s"])
     m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref_total)
+    values = [
+        guess["room_c"],
+        guess["sink_c"],
+        guess["t3_c"],
+        guess["t4_c"],
+        guess["t6_c"],
+        guess["tevap_c"],
+        guess["tcond_c"],
+        m_ref_cascade,
+        m_ref_dock,
+        guess.get("dock_c", config["boundary_conditions"]["dock_initial_c"]),
+    ]
+    if _receiver_enabled(config):
+        values.append(_receiver_initial_mass_kg(config))
+    if _lpr_subcooling_control_enabled(config):
+        values.append(_lpr_initial_subcooling_k(config))
+    return np.array(values, dtype=float)
+
+
+def system_mode(config: dict[str, Any]) -> str:
+    raw_mode = config.get("system_mode", config.get("mode"))
+    system_cfg = config.get("system", {})
+    if isinstance(system_cfg, dict):
+        raw_mode = system_cfg.get("mode", raw_mode)
+    mode = str(raw_mode or "cascade").strip().lower()
+    if mode not in SUPPORTED_SYSTEM_MODES:
+        raise ValueError(f"Unsupported system mode '{mode}'. Choose one of: {', '.join(sorted(SUPPORTED_SYSTEM_MODES))}.")
+    if mode == "air":
+        return "air_cycle"
+    if mode == "vapor_compression":
+        return "vcc"
+    return mode
+
+
+TRANSIENT_REGENERATOR_MODELS = {"transient_distributed", "transient_lumped", "distributed_transient", "yang_transient"}
+
+
+def _air_cycle_transient_regenerator_config(config: dict[str, Any]) -> dict[str, Any] | None:
+    reg_cfg = config.get("air_cycle", {}).get("regenerator", {})
+    if not isinstance(reg_cfg, dict):
+        return None
+    model = str(reg_cfg.get("model", "")).strip().lower()
+    if model not in TRANSIENT_REGENERATOR_MODELS:
+        return None
+    return reg_cfg
+
+
+def _air_cycle_transient_regenerator_cell_count(config: dict[str, Any]) -> int:
+    reg_cfg = _air_cycle_transient_regenerator_config(config)
+    if reg_cfg is None:
+        return 0
+    return max(1, int(reg_cfg.get("cell_count", reg_cfg.get("cells", 12))))
+
+
+def _air_cycle_regenerator_initial_cells_c(config: dict[str, Any], guess: dict[str, Any]) -> list[float]:
+    reg_cfg = _air_cycle_transient_regenerator_config(config)
+    if reg_cfg is None:
+        return []
+
+    cell_count = _air_cycle_transient_regenerator_cell_count(config)
+    profile_k = reg_cfg.get("initial_solid_profile_k")
+    if isinstance(profile_k, list) and profile_k:
+        values = [float(value) - KELVIN_OFFSET for value in profile_k]
+        if len(values) >= cell_count:
+            return values[:cell_count]
+        return values + [values[-1]] * (cell_count - len(values))
+
+    profile_c = reg_cfg.get("initial_solid_profile_c")
+    if isinstance(profile_c, list) and profile_c:
+        values = [float(value) for value in profile_c]
+        if len(values) >= cell_count:
+            return values[:cell_count]
+        return values + [values[-1]] * (cell_count - len(values))
+
+    if "initial_solid_k" in reg_cfg:
+        initial_c = float(reg_cfg["initial_solid_k"]) - KELVIN_OFFSET
+    elif "initial_solid_c" in reg_cfg:
+        initial_c = float(reg_cfg["initial_solid_c"])
+    else:
+        initial_c = float(guess.get("room_c", config.get("boundary_conditions", {}).get("ambient_c", 30.0)))
+    return [initial_c] * cell_count
+
+
+def _expanded_air_cycle_solver_vector(
+    config: dict[str, Any],
+    configured: list[float] | tuple[float, ...] | None,
+    default_base: list[float],
+    target_len: int,
+    cell_default: float,
+    *,
+    transient_base_override: list[float] | None = None,
+) -> list[float]:
+    values = list(configured) if configured is not None else list(default_base)
+    if len(values) == target_len:
+        return values
+    if target_len > 5 and len(values) == 5:
+        base = list(transient_base_override) if transient_base_override is not None else values
+        return base + [cell_default] * (target_len - 5)
+    return values
+
+
+def _cascade_step_solver_config(config: dict[str, Any], model: CascadeSystemModel, sim_cfg: dict[str, Any], unknowns: np.ndarray) -> dict[str, Any]:
+    lower = [-83.15, -3.15, -100.0, -100.0, -100.0, -73.15, 0.0, 1.0e-6, 1.0e-6, -50.0]
+    upper = [46.85, 86.85, 120.0, 120.0, 120.0, 46.85, 90.0, 5.0, 5.0, 46.85]
+    steps = [10.0, 10.0, 10.0, 10.0, 10.0, 5.0, 10.0, 0.01, 0.01, 10.0]
+    residual_scales = [1.0, 1.0, 1.0, 1.0e5, 1.0e5, 1.0e5, 1.0e5, 0.1, 0.1, 0.1]
+
+    if model.high_pressure_receiver_enabled():
+        receiver_cfg = _receiver_config(config)
+        lower.append(float(receiver_cfg.get("mass_min_kg", sim_cfg.get("receiver_mass_lower_bound_kg", 0.0))))
+        upper.append(
+            float(receiver_cfg.get("mass_max_kg", receiver_cfg.get("maximum_mass_kg", sim_cfg.get("receiver_mass_upper_bound_kg", 100.0))))
+        )
+        idx = len(lower) - 1
+        steps.append(float(receiver_cfg.get("mass_step_scale_kg", sim_cfg.get("receiver_mass_step_scale_kg", max(abs(float(unknowns[idx])), 0.1)))))
+        residual_scales.append(float(receiver_cfg.get("mass_residual_scale_kg", sim_cfg.get("receiver_mass_residual_scale_kg", 0.1))))
+
+    if _lpr_subcooling_control_enabled(config):
+        lpr_cfg = _low_pressure_receiver_config(config)
+        idx = len(lower)
+        lower.append(float(lpr_cfg.get("subcooling_min_k", 0.0)))
+        upper.append(float(lpr_cfg.get("subcooling_max_k", 30.0)))
+        steps.append(float(lpr_cfg.get("subcooling_step_scale_k", max(abs(float(unknowns[idx])), 1.0))))
+        residual_scales.append(float(lpr_cfg.get("subcooling_residual_scale_k", 1.0)))
+
+    if len(lower) != int(unknowns.size):
+        return sim_cfg
+
+    return {
+        **sim_cfg,
+        "state_lower_bounds": lower,
+        "state_upper_bounds": upper,
+        "state_step_scales": steps,
+        "residual_scales": residual_scales,
+    }
+
+
+def air_cycle_initial_vector(config: dict[str, Any]) -> np.ndarray:
+    guess = config["initial_guess"]
+    air_cfg = config.get("air_cycle", {})
+    water_loop_cfg = air_cfg.get("water_loop", config.get("water_loop", {}))
+    if not isinstance(water_loop_cfg, dict):
+        water_loop_cfg = {}
+    water_loop_c = float(
+        guess.get(
+            "water_loop_c",
+            water_loop_cfg.get("initial_c", guess.get("sink_c", config.get("boundary_conditions", {}).get("ambient_c", 30.0))),
+        )
+    )
     return np.array(
         [
             guess["room_c"],
-            guess["sink_c"],
+            water_loop_c,
             guess["t3_c"],
             guess["t4_c"],
             guess["t6_c"],
-            guess["tevap_c"],
-            guess["tcond_c"],
-            m_ref_cascade,
-            m_ref_dock,
-            guess.get("dock_c", config["boundary_conditions"]["dock_initial_c"]),
+            *_air_cycle_regenerator_initial_cells_c(config, guess),
         ],
         dtype=float,
     )
 
 
+def vcc_initial_vector(config: dict[str, Any]) -> np.ndarray:
+    guess = config["initial_guess"]
+    m_ref_total = float(guess["m_ref_kg_s"])
+    m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref_total)
+    values = [
+        guess["sink_c"],
+        guess["tevap_c"],
+        guess["tcond_c"],
+        m_ref_cascade,
+        m_ref_dock,
+    ]
+    if _receiver_enabled(config):
+        values.append(_receiver_initial_mass_kg(config))
+    if _lpr_subcooling_control_enabled(config):
+        values.append(_lpr_initial_subcooling_k(config))
+    return np.array(values, dtype=float)
+
+
 def _split_refrigerant_mass_flow(config: dict[str, Any], total_m_ref_kg_s: float) -> tuple[float, float]:
+    if _vcc_evaporators_are_series(config):
+        total_m_ref_kg_s = max(float(total_m_ref_kg_s), 1.0e-6)
+        return total_m_ref_kg_s, total_m_ref_kg_s
     valves = config.get("vcc_cycle", {}).get("expansion_valves", {})
     cascade = valves.get("cascade", {})
     dock = valves.get("dock", {})
@@ -168,15 +513,28 @@ def _split_refrigerant_mass_flow(config: dict[str, Any], total_m_ref_kg_s: float
     return m_ref_cascade, m_ref_dock
 
 
-def _state_value(unknowns: np.ndarray, key: str) -> float:
+def _state_value(unknowns: np.ndarray, key: str, config: dict[str, Any] | None = None) -> float:
     if key == "m_ref_kg_s":
+        if config is not None and _vcc_evaporators_are_series(config):
+            return float(
+                0.5
+                * (
+                    unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]
+                    + unknowns[STATE_INDEX["m_ref_dock_kg_s"]]
+                )
+            )
         return float(unknowns[STATE_INDEX["m_ref_cascade_kg_s"]] + unknowns[STATE_INDEX["m_ref_dock_kg_s"]])
     return float(unknowns[STATE_INDEX[key]])
 
 
 def _set_state_value(config: dict[str, Any], unknowns: np.ndarray, key: str, value: float) -> None:
     if key == "m_ref_kg_s":
-        current_total = _state_value(unknowns, key)
+        if _vcc_evaporators_are_series(config):
+            value = max(float(value), 1.0e-6)
+            unknowns[STATE_INDEX["m_ref_cascade_kg_s"]] = value
+            unknowns[STATE_INDEX["m_ref_dock_kg_s"]] = value
+            return
+        current_total = _state_value(unknowns, key, config)
         if current_total > 0.0:
             cascade_fraction = float(unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]) / current_total
         else:
@@ -281,7 +639,11 @@ def _air_compressor_uses_damper_resistance(config: dict[str, Any]) -> bool:
 
 def _air_compressor_uses_constant_mass_flow(config: dict[str, Any]) -> bool:
     model = config["air_cycle"]["compressor_mass_flow"].get("model", "polynomial_volumetric_flow_head")
-    return model == "polynomial_volumetric_flow_head_speed_constant_mass_flow"
+    return model in {
+        "polynomial_volumetric_flow_head_speed_constant_mass_flow",
+        "lumped_screw_compressor",
+        "lumped_screw_constant_mass_flow",
+    }
 
 
 def _air_pressure_ratio_is_derived(config: dict[str, Any]) -> bool:
@@ -309,7 +671,7 @@ def _backcalculate_dock_evaporator_design(config: dict[str, Any], unknowns: np.n
     if not dock_cfg.get("startup_backcalculate_ua_w_k", dock_cfg.get("backcalculate_ua_from_startup", True)):
         return
 
-    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns
+    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns[:10]
     design_air_m_dot = float(dock_cfg.get("design_air_m_dot_kg_s", dock_cfg.get("air_m_dot_kg_s", 3.5)))
     air_m_dot_min = float(dock_cfg.get("air_m_dot_min_kg_s", 0.0))
     air_m_dot_max = float(dock_cfg.get("air_m_dot_max_kg_s", max(design_air_m_dot, air_m_dot_min)))
@@ -377,7 +739,7 @@ def _solve_air_pressure_ratio_for_t5(
     unknowns: np.ndarray,
     t5_target_c: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns[:10]
     lower, upper = _free_parameter_bounds(startup_cfg, "air_cycle.pressure_ratio", (1.01, 2.0))
 
     def residual(pressure_ratio: float) -> float:
@@ -402,7 +764,7 @@ def _solve_air_speed_for_mass_flow(
     unknowns: np.ndarray,
     target_m_air_kg_s: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns[:10]
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower, upper = _free_parameter_bounds(
         startup_cfg,
@@ -432,7 +794,7 @@ def _solve_air_speed_for_t5(
     unknowns: np.ndarray,
     t5_target_c: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns[:10]
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower, upper = _free_parameter_bounds(
         startup_cfg,
@@ -481,7 +843,7 @@ def _solve_air_speed_for_evaporator_capacity(
     unknowns: np.ndarray,
     target_capacity_w: float,
 ) -> int:
-    room_c, _, t3_c, t4_c, t6_c, tevap_c, _, _, _, dock_c = unknowns
+    room_c, _, t3_c, t4_c, t6_c, tevap_c, _, _, _, dock_c = unknowns[:10]
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower, upper = _free_parameter_bounds(
         startup_cfg,
@@ -546,16 +908,16 @@ def _air_metrics_for_head(
     x_room = float(x_room)
 
     state1 = humid_air_state(t6_k, p1, x_room)
-    compressor_head_is = float(head_m) * 9.80665
+    compressor_eta_is = float(air_cfg["compressor_eta_is"])
+    compressor_head_actual = float(head_m) * 9.80665
     p2 = model._pressure_from_isentropic_head(
         p1,
         x_room,
         state1.entropy_j_kg_da_k,
         state1.enthalpy_j_kg_da,
-        compressor_head_is,
+        compressor_head_actual * compressor_eta_is,
     )
-    state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
-    h2 = compressor_actual_enthalpy(state1.enthalpy_j_kg_da, state2s.enthalpy_j_kg_da, air_cfg["compressor_eta_is"])
+    h2 = state1.enthalpy_j_kg_da + compressor_head_actual
     state2 = state_at_enthalpy(p2, x_room, h2)
     state3 = humid_air_state(t3_k, p2, x_room)
     state4 = humid_air_state(t4_k, p2, x_room)
@@ -578,7 +940,7 @@ def _solve_air_head_for_t5(
     unknowns: np.ndarray,
     t5_target_c: float,
 ) -> tuple[float, dict[str, float], int]:
-    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns
+    room_c, _, t3_c, t4_c, t6_c, _, _, _, _, _ = unknowns[:10]
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
     lower = float(flow_cfg["head_min_m"])
     upper = float(flow_cfg["head_max_m"])
@@ -721,7 +1083,7 @@ def _initialize_air_damper_for_evaporator_capacity(
     t5_target_c: float,
     target_capacity_w: float,
 ) -> int:
-    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns
+    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns[:10]
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
     q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     target_q_cascade_w = float(target_capacity_w) - q_dock
@@ -763,7 +1125,7 @@ def _initialize_constant_air_flow_for_evaporator_capacity(
     t5_target_c: float,
     target_capacity_w: float,
 ) -> int:
-    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns
+    _, _, _, _, _, tevap_c, _, _, _, dock_c = unknowns[:10]
     flow_cfg = config["air_cycle"]["compressor_mass_flow"]
     q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     target_q_cascade_w = float(target_capacity_w) - q_dock
@@ -813,6 +1175,47 @@ def _solve_vcc_speed_for_map_capacity(
     return iterations
 
 
+def _compressor_displacement_m3_per_rev(compressor_cfg: dict[str, Any]) -> float:
+    displacement = float(compressor_cfg.get("displacement_m3_per_rev", 0.0))
+    if displacement > 0.0:
+        return displacement
+    swept_volume_m3_h = compressor_cfg.get("displacement_m3_h", compressor_cfg.get("swept_volume_m3_h"))
+    nominal_speed_rpm = compressor_cfg.get("nominal_speed_rpm", compressor_cfg.get("design_speed_rpm"))
+    if swept_volume_m3_h is None or nominal_speed_rpm is None:
+        return 0.0
+    displacement = float(swept_volume_m3_h) / max(float(nominal_speed_rpm) * 60.0, 1.0e-12)
+    compressor_cfg["displacement_m3_per_rev"] = float(displacement)
+    return displacement
+
+
+def _initialize_screw_compressor_from_pressure_ratio(
+    config: dict[str, Any],
+    compressor_cfg: dict[str, Any],
+    p_evap: float,
+    p_cond: float,
+    h7_target: float,
+    target_m_ref_kg_s: float,
+) -> float:
+    pressure_ratio = p_cond / max(p_evap, 1.0e-9)
+    screw_map = screw_compressor_pressure_ratio_map(compressor_cfg, pressure_ratio)
+    compressor_cfg["eta_is"] = float(screw_map["eta_is"])
+    compressor_cfg["eta_v"] = float(screw_map["eta_v"])
+    compressor_cfg["q_oil_w"] = float(screw_map["q_oil_w"])
+
+    suction_density = props_si("D", "P", p_evap, "H", h7_target, config["fluids"]["refrigerant"])
+    displacement = _compressor_displacement_m3_per_rev(compressor_cfg)
+    if displacement <= 0.0 and compressor_cfg.get("startup_backcalculate_displacement", False):
+        speed_rps = max(float(compressor_cfg.get("speed_rpm", 0.0)) / 60.0, 1.0e-12)
+        displacement = float(target_m_ref_kg_s) / max(suction_density * speed_rps * screw_map["eta_v"], 1.0e-12)
+        compressor_cfg["displacement_m3_per_rev"] = displacement
+    return compressor_mass_flow_positive_displacement(
+        suction_density,
+        float(compressor_cfg.get("speed_rpm", 0.0)),
+        displacement,
+        screw_map["eta_v"],
+    )
+
+
 def _build_paper_design_unknowns(config: dict[str, Any], startup_cfg: dict[str, Any]) -> tuple[np.ndarray, float]:
     targets = startup_cfg.get("targets", {})
     room_c = float(targets.get("room_c", config["initial_guess"].get("room_c", -30.0)))
@@ -830,9 +1233,14 @@ def _build_paper_design_unknowns(config: dict[str, Any], startup_cfg: dict[str, 
     t5_target_c = float(startup_cfg.get("t5_target_c", room_c - room_delta_t_c))
     m_ref_kg_s = float(config["initial_guess"].get("m_ref_kg_s", 0.1))
     m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref_kg_s)
+    unknowns = [room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c]
+    if _receiver_enabled(config):
+        unknowns.append(_receiver_initial_mass_kg(config))
+    if _lpr_subcooling_control_enabled(config):
+        unknowns.append(_lpr_initial_subcooling_k(config))
 
     return (
-        np.array([room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c], dtype=float),
+        np.array(unknowns, dtype=float),
         t5_target_c,
     )
 
@@ -878,7 +1286,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         iteration_count += _solve_air_speed_for_mass_flow(config, model, startup_cfg, unknowns, float(target_m_air))
         air_speed_solved = True
 
-    room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, _, _, dock_c = unknowns
+    room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, _, _, dock_c = unknowns[:10]
     air = model._evaluate_air_cycle(room_c + KELVIN_OFFSET, t3_c + KELVIN_OFFSET, t4_c + KELVIN_OFFSET, t6_c + KELVIN_OFFSET)
     q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
     q_evap_total = air["q_cascade"] + q_dock
@@ -888,11 +1296,20 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
     p_evap = p_sat(tevap_c + KELVIN_OFFSET, ref_fluid)
     p_cond_from_tcond = p_sat(tcond_c + KELVIN_OFFSET, ref_fluid)
     p_cond = p_cond_from_tcond
-    h9 = h_refrigerant_liquid(tcond_c + KELVIN_OFFSET - vcc_cfg["subcooling_k"], p_cond_from_tcond, ref_fluid, vcc_cfg["subcooling_k"])
+    subcooling_k = _lpr_initial_subcooling_k(config) if _lpr_subcooling_control_enabled(config) else float(vcc_cfg["subcooling_k"])
+    h9 = h_refrigerant_liquid(tcond_c + KELVIN_OFFSET - subcooling_k, p_cond_from_tcond, ref_fluid, subcooling_k)
+    receiver_mass_kg = _receiver_initial_mass_kg(config) if _receiver_enabled(config) else None
+    receiver = model._evaluate_high_pressure_receiver(receiver_mass_kg, p_cond, tcond_c + KELVIN_OFFSET, h9)
+    h10 = receiver["outlet_enthalpy_j_kg"]
     superheat_target_k = float(startup_cfg.get("superheat_target_k", 5.0))
-    h7_target = props_si("H", "T", tevap_c + KELVIN_OFFSET + superheat_target_k, "P", p_evap, ref_fluid)
-    s7_target = props_si("S", "P", p_evap, "H", h7_target, ref_fluid)
-    m_ref = q_evap_total / max(h7_target - h9, 1.0e-9)
+    if _compressor_uses_saturated_suction(config):
+        h7_target = props_si("H", "P", p_evap, "Q", 1.0, ref_fluid)
+        s7_target = props_si("S", "P", p_evap, "Q", 1.0, ref_fluid)
+        superheat_target_k = 0.0
+    else:
+        h7_target = props_si("H", "T", tevap_c + KELVIN_OFFSET + superheat_target_k, "P", p_evap, ref_fluid)
+        s7_target = props_si("S", "P", p_evap, "H", h7_target, ref_fluid)
+    m_ref = q_evap_total / max(h7_target - h10, 1.0e-9)
 
     compressor_cfg = vcc_cfg["compressor"]
     compressor_model = compressor_cfg.get("model", "simple_isentropic")
@@ -909,7 +1326,18 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
             check_range=bool(compressor_cfg.get("check_range", False)),
         )
         m_ref = compressor_map["mdot_kg_s"]
-        if compressor_uses_map_power_pressure_lift(compressor_cfg) and compressor_cfg.get("fit_eta_is_from_startup", True):
+        compressor_eta_is = ammonia_compressor_eta_is(
+            compressor_cfg,
+            tcond_c + KELVIN_OFFSET,
+            tevap_c + KELVIN_OFFSET,
+            compressor_cfg["speed_rpm"],
+            ref_fluid,
+        )
+        if (
+            compressor_uses_map_power_pressure_lift(compressor_cfg)
+            and compressor_cfg.get("fit_eta_is_from_startup", True)
+            and not compressor_uses_ammonia_eta_is_map(compressor_cfg, ref_fluid)
+        ):
             eta_fit = compressor_eta_is_from_map_power(
                 p_cond_from_tcond,
                 h7_target,
@@ -921,6 +1349,7 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
             eta_min = float(compressor_cfg.get("eta_is_min", 0.4))
             eta_max = float(compressor_cfg.get("eta_is_max", 0.95))
             compressor_cfg["eta_is"] = float(np.clip(eta_fit, eta_min, eta_max))
+            compressor_eta_is = compressor_cfg["eta_is"]
         if compressor_uses_map_power_pressure_lift(compressor_cfg):
             p_cond = compressor_discharge_pressure_from_power(
                 p_evap,
@@ -928,11 +1357,22 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
                 s7_target,
                 m_ref,
                 compressor_map["P_W"],
-                float(compressor_cfg.get("eta_is", 1.0)),
+                compressor_eta_is,
                 ref_fluid,
                 pressure_ratio_min=float(compressor_cfg.get("pressure_ratio_min", 1.000001)),
                 pressure_ratio_max=compressor_cfg.get("pressure_ratio_max"),
             )
+    elif compressor_model in SCREW_PRESSURE_RATIO_COMPRESSOR_MODELS:
+        if fixed_vcc_speed_rpm is not None:
+            compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
+        m_ref = _initialize_screw_compressor_from_pressure_ratio(
+            config,
+            compressor_cfg,
+            p_evap,
+            p_cond,
+            h7_target,
+            m_ref,
+        )
     elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
         if fixed_vcc_speed_rpm is not None:
             compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
@@ -955,23 +1395,38 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
             eta_v,
         )
     else:
-        eta_is = float(compressor_cfg.get("eta_is", 1.0))
+        eta_is = ammonia_compressor_eta_is(
+            compressor_cfg,
+            tcond_c + KELVIN_OFFSET,
+            tevap_c + KELVIN_OFFSET,
+            float(compressor_cfg.get("speed_rpm", 0.0)),
+            ref_fluid,
+        )
         h8s = props_si("H", "P", p_cond, "S", s7_target, ref_fluid)
         compressor_cfg["work_w"] = float(m_ref * (h8s - h7_target) / max(eta_is, 1.0e-6))
-    m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref)
-    q_total_for_split = max(q_evap_total, 1.0e-9)
-    m_ref_cascade = m_ref * air["q_cascade"] / q_total_for_split
-    m_ref_dock = m_ref * q_dock / q_total_for_split
+    if _vcc_evaporators_are_series(config):
+        m_ref_cascade = m_ref
+        m_ref_dock = m_ref
+    else:
+        q_total_for_split = max(q_evap_total, 1.0e-9)
+        m_ref_cascade = m_ref * air["q_cascade"] / q_total_for_split
+        m_ref_dock = m_ref * q_dock / q_total_for_split
     unknowns[STATE_INDEX["m_ref_cascade_kg_s"]] = max(m_ref_cascade, 1.0e-6)
     unknowns[STATE_INDEX["m_ref_dock_kg_s"]] = max(m_ref_dock, 1.0e-6)
 
     legacy_valve_cfg = dict(vcc_cfg.get("expansion_valve", {}))
     branch_valves = vcc_cfg.setdefault("expansion_valves", {})
-    branch_targets = {
-        "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
-        "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
-    }
-    valve_inlet_density = props_si("D", "P", p_cond, "H", h9, ref_fluid)
+    if _vcc_evaporators_are_series(config):
+        branch_targets = {
+            "cascade": (air["q_cascade"] + q_dock, _effective_refrigerant_mass_flow(config, m_ref_cascade, m_ref_dock)),
+        }
+    else:
+        branch_targets = {
+            "cascade": (air["q_cascade"], unknowns[STATE_INDEX["m_ref_cascade_kg_s"]]),
+            "dock": (q_dock, unknowns[STATE_INDEX["m_ref_dock_kg_s"]]),
+        }
+    receiver = model._evaluate_high_pressure_receiver(receiver_mass_kg, p_cond, tcond_c + KELVIN_OFFSET, h9)
+    valve_inlet_density = receiver["outlet_density_kg_m3"]
     valve_flow_factor = expansion_valve_flow_factor(p_cond, p_evap, valve_inlet_density)
     for branch, (_, branch_m_ref) in branch_targets.items():
         valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
@@ -1005,6 +1460,8 @@ def _solve_paper_design_initialization(config: dict[str, Any], model: CascadeSys
         unknowns[STATE_INDEX["m_ref_dock_kg_s"]],
         air["q_cascade"],
         q_dock,
+        receiver_mass_kg,
+        subcooling_k,
     )
     reg_lmtd = positive_lmtd(t3_c - t6_c, t4_c - room_c)
     cascade_lmtd = positive_lmtd(air["t2_k"] - KELVIN_OFFSET - tevap_c, t3_c - tevap_c)
@@ -1153,8 +1610,13 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
     x_scale: list[float] = []
 
     for key in free_state_keys:
-        x0.append(_state_value(fixed_unknowns, key))
-        if key.startswith("m_ref"):
+        x0.append(_state_value(fixed_unknowns, key, config))
+        if key == "receiver_mass_kg":
+            receiver_cfg = _receiver_config(config)
+            lower.append(float(receiver_cfg.get("mass_min_kg", startup_cfg.get("receiver_mass_min_kg", 0.0))))
+            upper.append(float(receiver_cfg.get("mass_max_kg", startup_cfg.get("receiver_mass_max_kg", 100.0))))
+            x_scale.append(max(abs(x0[-1]), 0.1))
+        elif key.startswith("m_ref"):
             lower.append(float(startup_cfg.get("mass_flow_min_kg_s", 1.0e-6)))
             upper.append(float(startup_cfg.get("mass_flow_max_kg_s", 5.0)))
             x_scale.append(max(abs(x0[-1]), 1.0e-3))
@@ -1189,7 +1651,7 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
         balance = model.startup_balance_residual(unknowns, time_s)
         scaled = []
         for idx, value in enumerate(balance):
-            scale = scales["kg_s"] if idx >= len(balance) - 3 else scales["w"]
+            scale = scales["kg_s"] if idx >= 7 else scales["w"]
             scaled.append(value / scale)
         return np.asarray(scaled, dtype=float)
 
@@ -1277,6 +1739,194 @@ def solve_startup_initialization(config: dict, model: CascadeSystemModel) -> Sta
     return result
 
 
+def initialize_vcc_standalone_design(
+    config: dict[str, Any],
+    model: CascadeSystemModel,
+    unknowns: np.ndarray,
+) -> StartupInitializationResult:
+    sim_cfg = config["simulation"]
+    startup_cfg = sim_cfg.get("startup_initialization", {})
+    time_s = float(startup_cfg.get("time_s", sim_cfg["t_start_s"]))
+    if not startup_cfg.get("enabled", False):
+        snapshot = model.vcc_post_process(unknowns, time_s).values
+        return StartupInitializationResult(unknowns, 0, 0.0, snapshot, cache_hit=False, cache_path=None)
+
+    targets = startup_cfg.get("targets", {})
+    sink_c = float(targets.get("sink_c", unknowns[0]))
+    tevap_c = float(targets.get("tevap_c", unknowns[1]))
+    tcond_c = float(targets.get("tcond_c", unknowns[2]))
+    unknowns[0] = sink_c
+    unknowns[1] = tevap_c
+    unknowns[2] = tcond_c
+
+    loads = model._vcc_standalone_loads_w(time_s)
+    q_evap_total = max(float(loads["total_w"]), 0.0)
+    if q_evap_total <= 0.0:
+        snapshot = model.vcc_post_process(unknowns, time_s).values
+        return StartupInitializationResult(unknowns, 0, 0.0, snapshot, cache_hit=False, cache_path=None)
+
+    ref_fluid = config["fluids"]["refrigerant"]
+    vcc_cfg = config["vcc_cycle"]
+    p_evap = p_sat(tevap_c + KELVIN_OFFSET, ref_fluid)
+    p_cond = p_sat(tcond_c + KELVIN_OFFSET, ref_fluid)
+    subcooling_k = _lpr_initial_subcooling_k(config) if _lpr_subcooling_control_enabled(config) else float(vcc_cfg["subcooling_k"])
+    h9 = h_refrigerant_liquid(tcond_c + KELVIN_OFFSET - subcooling_k, p_cond, ref_fluid, subcooling_k)
+    receiver_mass_kg = float(unknowns[5]) if _receiver_enabled(config) and unknowns.size > 5 else None
+    receiver = model._evaluate_high_pressure_receiver(receiver_mass_kg, p_cond, tcond_c + KELVIN_OFFSET, h9)
+    h10 = receiver["outlet_enthalpy_j_kg"]
+    superheat_target_k = float(startup_cfg.get("superheat_target_k", vcc_cfg.get("standalone_superheat_target_k", 5.0)))
+    if _compressor_uses_saturated_suction(config):
+        h7_target = props_si("H", "P", p_evap, "Q", 1.0, ref_fluid)
+        s7_target = props_si("S", "P", p_evap, "Q", 1.0, ref_fluid)
+        superheat_target_k = 0.0
+    else:
+        h7_target = props_si("H", "T", tevap_c + KELVIN_OFFSET + superheat_target_k, "P", p_evap, ref_fluid)
+        s7_target = props_si("S", "P", p_evap, "H", h7_target, ref_fluid)
+    m_ref = q_evap_total / max(h7_target - h10, 1.0e-9)
+
+    compressor_cfg = vcc_cfg["compressor"]
+    compressor_model = compressor_cfg.get("model", "simple_isentropic")
+    iteration_count = 0
+    fixed_vcc_speed_rpm = startup_cfg.get("fixed_vcc_compressor_speed_rpm")
+    if compressor_model == "bitzer_variable_speed_map":
+        if fixed_vcc_speed_rpm is None:
+            iteration_count += _solve_vcc_speed_for_map_capacity(config, startup_cfg, tevap_c, tcond_c, q_evap_total)
+        else:
+            compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
+        compressor_map = ammonia_compressor_map(
+            tcond_c + KELVIN_OFFSET,
+            tevap_c + KELVIN_OFFSET,
+            compressor_cfg["speed_rpm"],
+            check_range=bool(compressor_cfg.get("check_range", False)),
+        )
+        m_ref = compressor_map["mdot_kg_s"]
+        compressor_eta_is = ammonia_compressor_eta_is(
+            compressor_cfg,
+            tcond_c + KELVIN_OFFSET,
+            tevap_c + KELVIN_OFFSET,
+            compressor_cfg["speed_rpm"],
+            ref_fluid,
+        )
+        if (
+            compressor_uses_map_power_pressure_lift(compressor_cfg)
+            and compressor_cfg.get("fit_eta_is_from_startup", True)
+            and not compressor_uses_ammonia_eta_is_map(compressor_cfg, ref_fluid)
+        ):
+            eta_fit = compressor_eta_is_from_map_power(p_cond, h7_target, s7_target, m_ref, compressor_map["P_W"], ref_fluid)
+            compressor_cfg["eta_is"] = float(
+                np.clip(
+                    eta_fit,
+                    float(compressor_cfg.get("eta_is_min", 0.4)),
+                    float(compressor_cfg.get("eta_is_max", 0.95)),
+                )
+            )
+            compressor_eta_is = compressor_cfg["eta_is"]
+    elif compressor_model in SCREW_PRESSURE_RATIO_COMPRESSOR_MODELS:
+        if fixed_vcc_speed_rpm is not None:
+            compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
+        m_ref = _initialize_screw_compressor_from_pressure_ratio(
+            config,
+            compressor_cfg,
+            p_evap,
+            p_cond,
+            h7_target,
+            m_ref,
+        )
+    elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
+        if fixed_vcc_speed_rpm is not None:
+            compressor_cfg["speed_rpm"] = float(fixed_vcc_speed_rpm)
+        pressure_ratio = p_cond / max(p_evap, 1.0e-9)
+        suction_density = props_si("D", "P", p_evap, "H", h7_target, ref_fluid)
+        eta_v = compressor_volumetric_efficiency_clearance(
+            pressure_ratio,
+            float(compressor_cfg.get("clearance_factor", 0.05)),
+            float(compressor_cfg.get("polytropic_exponent", 1.25)),
+            float(compressor_cfg.get("eta_v_min", 0.3)),
+            float(compressor_cfg.get("eta_v_max", 1.0)),
+        )
+        if compressor_cfg.get("startup_backcalculate_displacement", compressor_cfg.get("backcalculate_displacement_from_startup", True)):
+            speed_rps = max(float(compressor_cfg.get("speed_rpm", 0.0)) / 60.0, 1.0e-12)
+            compressor_cfg["displacement_m3_per_rev"] = m_ref / max(suction_density * speed_rps * eta_v, 1.0e-12)
+        m_ref = compressor_mass_flow_positive_displacement(
+            suction_density,
+            float(compressor_cfg.get("speed_rpm", 0.0)),
+            float(compressor_cfg["displacement_m3_per_rev"]),
+            eta_v,
+        )
+    else:
+        eta_is = ammonia_compressor_eta_is(
+            compressor_cfg,
+            tcond_c + KELVIN_OFFSET,
+            tevap_c + KELVIN_OFFSET,
+            float(compressor_cfg.get("speed_rpm", 0.0)),
+            ref_fluid,
+        )
+        h8s = props_si("H", "P", p_cond, "S", s7_target, ref_fluid)
+        compressor_cfg["work_w"] = float(m_ref * (h8s - h7_target) / max(eta_is, 1.0e-6))
+
+    q_cascade = max(float(loads["cascade_w"]), 0.0)
+    q_dock = max(float(loads["dock_w"]), 0.0)
+    if _vcc_evaporators_are_series(config):
+        m_ref_cascade = m_ref
+        m_ref_dock = m_ref
+    elif q_cascade + q_dock > 0.0:
+        m_ref_cascade = m_ref * q_cascade / max(q_cascade + q_dock, 1.0e-9)
+        m_ref_dock = m_ref * q_dock / max(q_cascade + q_dock, 1.0e-9)
+    else:
+        m_ref_cascade, m_ref_dock = _split_refrigerant_mass_flow(config, m_ref)
+    unknowns[3] = max(m_ref_cascade, 1.0e-6)
+    unknowns[4] = max(m_ref_dock, 1.0e-6)
+
+    legacy_valve_cfg = dict(vcc_cfg.get("expansion_valve", {}))
+    branch_valves = vcc_cfg.setdefault("expansion_valves", {})
+    valve_inlet_density = receiver["outlet_density_kg_m3"]
+    valve_flow_factor = expansion_valve_flow_factor(p_cond, p_evap, valve_inlet_density)
+    if _vcc_evaporators_are_series(config):
+        branch_targets = {"cascade": _effective_refrigerant_mass_flow(config, unknowns[3], unknowns[4])}
+    else:
+        branch_targets = {
+            "cascade": unknowns[3],
+            "dock": unknowns[4],
+        }
+    for branch, branch_m_ref in branch_targets.items():
+        valve_cfg = branch_valves.setdefault(branch, dict(legacy_valve_cfg))
+        had_orifice_coefficient = "flow_coefficient_m2" in valve_cfg or "flow_coefficient_kg_s_sqrt_pa_density" in valve_cfg
+        if "flow_coefficient_m2" not in valve_cfg:
+            legacy_coefficient = legacy_valve_cfg.get(
+                "flow_coefficient_m2",
+                legacy_valve_cfg.get("flow_coefficient_kg_s_sqrt_pa_density", legacy_valve_cfg.get("flow_coefficient_kg_s_pa", 0.0)),
+            )
+            valve_cfg.setdefault("flow_coefficient_m2", legacy_coefficient)
+        opening_min = float(valve_cfg.get("opening_min", 0.05))
+        opening_max = float(valve_cfg.get("opening_max", 1.0))
+        opening_target = float(np.clip(float(valve_cfg.get("opening", 0.5)), opening_min, opening_max))
+        backcalculate_coefficient = bool(
+            valve_cfg.get(
+                "startup_backcalculate_flow_coefficient_m2",
+                not had_orifice_coefficient,
+            )
+        )
+        if backcalculate_coefficient:
+            valve_cfg["flow_coefficient_m2"] = float(branch_m_ref / max(opening_target * valve_flow_factor, 1.0e-12))
+            valve_cfg["opening"] = opening_target
+        else:
+            valve_opening = branch_m_ref / max(expansion_valve_flow_coefficient(valve_cfg) * valve_flow_factor, 1.0e-12)
+            valve_cfg["opening"] = float(np.clip(valve_opening, opening_min, opening_max))
+
+    snapshot = model.vcc_post_process(unknowns, time_s).values
+    snapshot["startup_vcc_standalone_superheat_target_k"] = superheat_target_k
+    snapshot["startup_solved_vcc_cycle_compressor_displacement_m3_per_rev"] = float(
+        compressor_cfg.get("displacement_m3_per_rev", 0.0)
+    )
+    snapshot["startup_solved_vcc_cycle_expansion_valves_cascade_flow_coefficient_m2"] = float(
+        branch_valves.get("cascade", {}).get("flow_coefficient_m2", 0.0)
+    )
+    snapshot["startup_solved_vcc_cycle_expansion_valves_dock_flow_coefficient_m2"] = float(
+        branch_valves.get("dock", {}).get("flow_coefficient_m2", 0.0)
+    )
+    return StartupInitializationResult(unknowns, iteration_count, 0.0, snapshot, cache_hit=False, cache_path=None)
+
+
 def solve_dynamic_step(
     residual_fn,
     x0: np.ndarray,
@@ -1284,18 +1934,61 @@ def solve_dynamic_step(
     jacobian_executor: ThreadPoolExecutor | None = None,
 ) -> tuple[np.ndarray, int]:
     residual0 = np.asarray(residual_fn(np.asarray(x0, dtype=float)), dtype=float)
-    if residual0.size == 10:
-        residual_scales = np.ones_like(residual0)
-        residual_scales[3:7] = float(sim_cfg.get("fallback_power_residual_scale_w", 1.0e5))
-        residual_scales[7:10] = float(sim_cfg.get("fallback_mass_flow_residual_scale_kg_s", 0.1))
+    configured_lower = sim_cfg.get("state_lower_bounds")
+    configured_upper = sim_cfg.get("state_upper_bounds")
+    if configured_lower is not None and configured_upper is not None:
+        lower = np.asarray(configured_lower, dtype=float)
+        upper = np.asarray(configured_upper, dtype=float)
+        x0_array = np.asarray(x0, dtype=float)
+        if lower.size != x0_array.size or upper.size != x0_array.size:
+            raise ValueError("Configured state bounds must match the dynamic state vector length.")
+        residual_scales = np.asarray(sim_cfg.get("residual_scales", np.ones_like(residual0)), dtype=float)
+        if residual_scales.size != residual0.size:
+            residual_scales = np.ones_like(residual0)
+        residual_scales = np.maximum(np.abs(residual_scales), 1.0e-12)
 
         def scaled_residual_fn(x: np.ndarray) -> np.ndarray:
             return np.asarray(residual_fn(x), dtype=float) / residual_scales
 
-        lower = np.array([-83.15, -3.15, -100.0, -100.0, -100.0, -73.15, 0.0, 1.0e-6, 1.0e-6, -50.0], dtype=float)
-        upper = np.array([46.85, 86.85, 120.0, 120.0, 120.0, 46.85, 90.0, 5.0, 5.0, 46.85], dtype=float)
-        x0_bounded = np.clip(np.asarray(x0, dtype=float), lower, upper)
-        step_scales = np.array([10.0, 10.0, 10.0, 10.0, 10.0, 5.0, 10.0, 0.01, 0.01, 10.0], dtype=float)
+        x0_bounded = np.clip(x0_array, lower, upper)
+        step_scales = np.asarray(sim_cfg.get("state_step_scales", np.maximum(np.abs(x0_bounded), 1.0)), dtype=float)
+        if step_scales.size != x0_bounded.size:
+            step_scales = np.maximum(np.abs(x0_bounded), 1.0)
+        result = least_squares(
+            scaled_residual_fn,
+            x0_bounded,
+            bounds=(lower, upper),
+            x_scale=np.maximum(np.abs(step_scales), 1.0e-12),
+            ftol=sim_cfg.get("fallback_least_squares_tol", sim_cfg["newton_tol"]),
+            xtol=sim_cfg.get("fallback_least_squares_tol", sim_cfg["newton_tol"]),
+            gtol=sim_cfg.get("fallback_least_squares_tol", sim_cfg["newton_tol"]),
+            max_nfev=sim_cfg.get("fallback_max_function_evals", 500),
+        )
+        if result.success:
+            return np.asarray(result.x, dtype=float), int(result.nfev)
+
+    if residual0.size in {10, 11} and np.asarray(x0, dtype=float).size in {10, 11}:
+        residual_scales = np.ones_like(residual0)
+        residual_scales[3:7] = float(sim_cfg.get("fallback_power_residual_scale_w", 1.0e5))
+        residual_scales[7:10] = float(sim_cfg.get("fallback_mass_flow_residual_scale_kg_s", 0.1))
+        if residual0.size > 10:
+            residual_scales[10] = float(sim_cfg.get("receiver_mass_residual_scale_kg", 0.1))
+
+        def scaled_residual_fn(x: np.ndarray) -> np.ndarray:
+            return np.asarray(residual_fn(x), dtype=float) / residual_scales
+
+        x0_array = np.asarray(x0, dtype=float)
+        lower_values = [-83.15, -3.15, -100.0, -100.0, -100.0, -73.15, 0.0, 1.0e-6, 1.0e-6, -50.0]
+        upper_values = [46.85, 86.85, 120.0, 120.0, 120.0, 46.85, 90.0, 5.0, 5.0, 46.85]
+        step_values = [10.0, 10.0, 10.0, 10.0, 10.0, 5.0, 10.0, 0.01, 0.01, 10.0]
+        if x0_array.size > 10:
+            lower_values.append(float(sim_cfg.get("receiver_mass_lower_bound_kg", 0.0)))
+            upper_values.append(float(sim_cfg.get("receiver_mass_upper_bound_kg", 100.0)))
+            step_values.append(float(sim_cfg.get("receiver_mass_step_scale_kg", max(abs(x0_array[10]), 0.1))))
+        lower = np.array(lower_values, dtype=float)
+        upper = np.array(upper_values, dtype=float)
+        x0_bounded = np.clip(x0_array, lower, upper)
+        step_scales = np.array(step_values, dtype=float)
         x = x0_bounded.copy()
         for iteration in range(1, int(sim_cfg.get("newton_max_iter", 100)) + 1):
             residual = scaled_residual_fn(x)
@@ -1360,9 +2053,11 @@ def solve_dynamic_step(
         )
     except NewtonSolveError:
         residual_scales = np.ones_like(residual0)
-        if residual0.size == 10:
+        if residual0.size in {10, 11}:
             residual_scales[3:7] = float(sim_cfg.get("fallback_power_residual_scale_w", 1.0e5))
             residual_scales[7:10] = float(sim_cfg.get("fallback_mass_flow_residual_scale_kg_s", 0.1))
+            if residual0.size > 10:
+                residual_scales[10] = float(sim_cfg.get("receiver_mass_residual_scale_kg", 0.1))
 
         def scaled_residual_fn(x: np.ndarray) -> np.ndarray:
             return np.asarray(residual_fn(x), dtype=float) / residual_scales
@@ -1381,9 +2076,42 @@ def solve_dynamic_step(
         return np.asarray(result.x, dtype=float), int(result.nfev)
 
 
+def _filtered_control_system(config: dict[str, Any], measurements: dict[str, Any], frozen_actuator_paths: set[str] | None = None) -> ControlSystem:
+    control_cfg = config.get("control", {})
+    if not control_cfg.get("enabled", False):
+        return ControlSystem(config, frozen_actuator_paths=frozen_actuator_paths)
+
+    compatible_controllers = []
+    for controller in control_cfg.get("controllers", []):
+        if controller.get("measurement") not in measurements:
+            continue
+        actuator_path = controller.get("actuator_path")
+        if not isinstance(actuator_path, str) or not _path_exists(config, actuator_path):
+            continue
+        compatible_controllers.append(controller)
+
+    if len(compatible_controllers) == len(control_cfg.get("controllers", [])):
+        return ControlSystem(config, frozen_actuator_paths=frozen_actuator_paths)
+
+    filtered_config = deepcopy(config)
+    filtered_config["control"] = {**control_cfg, "controllers": compatible_controllers, "enabled": bool(compatible_controllers)}
+    return ControlSystem(filtered_config, frozen_actuator_paths=frozen_actuator_paths)
+
+
 def run_simulation(config: dict) -> list[dict[str, float]]:
     plant_config = deepcopy(config)
     configure_property_backend_from_config(plant_config)
+    _configure_receiver_defaults(plant_config)
+    _configure_lpr_subcooling_defaults(plant_config)
+    mode = system_mode(plant_config)
+    if mode == "air_cycle":
+        return _run_air_cycle_simulation(plant_config)
+    if mode == "vcc":
+        return _run_vcc_simulation(plant_config)
+    return _run_cascade_simulation(plant_config)
+
+
+def _run_cascade_simulation(plant_config: dict[str, Any]) -> list[dict[str, float]]:
     sim_cfg = plant_config["simulation"]
     model = CascadeSystemModel(plant_config)
     progress_interval = int(sim_cfg.get("progress_interval_steps", 20))
@@ -1411,6 +2139,9 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
     else:
         unknowns = initial_vector(plant_config)
 
+    model.refresh_dynamic_ua_nominal_flows(unknowns)
+    step_sim_cfg = _cascade_step_solver_config(plant_config, model, sim_cfg, unknowns)
+
     if startup_snapshot:
         for controller in plant_config.get("control", {}).get("controllers", []):
             setpoint_from_startup = controller.get("setpoint_from_startup")
@@ -1424,7 +2155,13 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
     model.reset_room_moisture(float(unknowns[0]))
     model.reset_infiltration_disturbance(float(unknowns[0]), float(unknowns[9]))
     control = ControlSystem(plant_config, frozen_actuator_paths=frozen_actuator_paths)
-    state = np.array([unknowns[0], unknowns[1], unknowns[9], model.current_room_humidity_ratio()], dtype=float)
+    state_values = [unknowns[0], unknowns[1], unknowns[9], model.current_room_humidity_ratio()]
+    if model.high_pressure_receiver_enabled():
+        state_values.append(float(unknowns[10]))
+    if model.lpr_subcooling_control_enabled():
+        subcooling_idx = 10 + (1 if model.high_pressure_receiver_enabled() else 0)
+        state_values.append(float(unknowns[subcooling_idx]))
+    state = np.array(state_values, dtype=float)
     history: list[dict[str, float]] = []
     jacobian_workers = max(1, int(sim_cfg.get("jacobian_workers", 1)))
 
@@ -1443,6 +2180,7 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
                         step.values[key] = value
                 step.values["newton_iterations"] = 0.0
                 history.append(step.values)
+                model.reset_receiver_inlet_flow(step.values.get("compressor_map_flow_kg_s", step.values["m_ref_kg_s"]))
                 _log(
                     f"[startup] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
                     f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
@@ -1458,16 +2196,217 @@ def run_simulation(config: dict) -> list[dict[str, float]]:
             def residual_fn(x: np.ndarray) -> np.ndarray:
                 return model.residual(x, prev_state, time_s, dt_s)
 
-            unknowns, iters = solve_dynamic_step(residual_fn, unknowns, sim_cfg, jacobian_executor)
+            unknowns, iters = solve_dynamic_step(residual_fn, unknowns, step_sim_cfg, jacobian_executor)
             step = model.post_process(unknowns, time_s)
+            step.values["newton_iterations"] = float(iters)
+            step.values.update(controller_outputs)
+            history.append(step.values)
+            state = step.state_vector
+            model.advance_receiver_inlet_flow(step.values.get("compressor_map_flow_kg_s", step.values["m_ref_kg_s"]), dt_s)
+            if idx % max(progress_interval, 1) == 0 or idx == len(times) - 1:
+                _log(
+                    f"[run] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
+                    f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
+                    f"COP={step.values['cop_system']:.3f} | newton={iters}"
+                )
+    finally:
+        if jacobian_executor is not None:
+            jacobian_executor.shutdown()
+
+    return history
+
+
+def _run_air_cycle_simulation(plant_config: dict[str, Any]) -> list[dict[str, float]]:
+    sim_cfg = plant_config["simulation"]
+    model = CascadeSystemModel(plant_config)
+    progress_interval = int(sim_cfg.get("progress_interval_steps", 20))
+
+    dt_s = sim_cfg["dt_s"]
+    times = np.arange(sim_cfg["t_start_s"], sim_cfg["t_end_s"] + dt_s, dt_s)
+    unknowns = air_cycle_initial_vector(plant_config)
+
+    configure_disturbances(plant_config)
+    model.reset_room_moisture(float(unknowns[0]))
+    model.reset_infiltration_disturbance(
+        float(unknowns[0]),
+        float(plant_config.get("boundary_conditions", {}).get("dock_initial_c", unknowns[0])),
+    )
+    state = np.array([unknowns[0], unknowns[1], model.current_room_humidity_ratio()], dtype=float)
+    history: list[dict[str, float]] = []
+    control: ControlSystem | None = None
+    jacobian_workers = max(1, int(sim_cfg.get("jacobian_workers", 1)))
+    target_state_len = int(unknowns.size)
+    transient_reg_cfg = _air_cycle_transient_regenerator_config(plant_config)
+    step_sim_cfg = {
+        **sim_cfg,
+        "state_lower_bounds": _expanded_air_cycle_solver_vector(
+            plant_config,
+            sim_cfg.get("air_cycle_state_lower_bounds", sim_cfg.get("state_lower_bounds")),
+            [-83.15, -20.0, -100.0, -100.0, -100.0],
+            target_state_len,
+            float(transient_reg_cfg.get("solid_lower_c", -200.0)) if transient_reg_cfg is not None else -200.0,
+        ),
+        "state_upper_bounds": _expanded_air_cycle_solver_vector(
+            plant_config,
+            sim_cfg.get("air_cycle_state_upper_bounds", sim_cfg.get("state_upper_bounds")),
+            [46.85, 120.0, 150.0, 150.0, 150.0],
+            target_state_len,
+            float(transient_reg_cfg.get("solid_upper_c", 150.0)) if transient_reg_cfg is not None else 150.0,
+        ),
+        "state_step_scales": _expanded_air_cycle_solver_vector(
+            plant_config,
+            sim_cfg.get("air_cycle_state_step_scales", sim_cfg.get("state_step_scales")),
+            [10.0, 10.0, 10.0, 10.0, 10.0],
+            target_state_len,
+            float(transient_reg_cfg.get("solid_step_scale_k", 10.0)) if transient_reg_cfg is not None else 10.0,
+        ),
+        "residual_scales": _expanded_air_cycle_solver_vector(
+            plant_config,
+            sim_cfg.get("air_cycle_residual_scales", sim_cfg.get("residual_scales")),
+            [1.0, 1.0, 1.0e5, 1.0e5, 1.0e5],
+            target_state_len,
+            float(transient_reg_cfg.get("solid_residual_scale_k", 1.0)) if transient_reg_cfg is not None else 1.0,
+            transient_base_override=[1.0, 1.0, 1.0, 1.0, 1.0] if transient_reg_cfg is not None else None,
+        ),
+    }
+
+    _log(f"[run:air_cycle] steps={len(times) - 1} dt={dt_s:.1f}s interval={progress_interval}")
+    jacobian_executor = ThreadPoolExecutor(max_workers=jacobian_workers) if jacobian_workers > 1 else None
+    try:
+        for idx, time_s in enumerate(times):
+            if idx == 0:
+                step = model.air_cycle_post_process(unknowns, time_s)
+                step.values["startup_initialization_enabled"] = 0.0
+                step.values["startup_iterations"] = 0.0
+                step.values["startup_newton_iterations"] = 0.0
+                step.values["startup_cost"] = 0.0
+                step.values["newton_iterations"] = 0.0
+                history.append(step.values)
+                state = step.state_vector
+                control = _filtered_control_system(plant_config, step.values)
+                _log(
+                    f"[startup:air_cycle] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
+                    f"water={step.values['water_loop_c']:.2f} C | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
+                    f"COP={step.values['cop_system']:.3f}"
+                )
+                continue
+
+            prev_state = state.copy()
+            model.advance_infiltration_disturbance(time_s, dt_s, history[-1])
+            model.advance_room_moisture(dt_s, history[-1])
+            controller_outputs = control.update(history[-1], plant_config, dt_s) if control is not None else {}
+
+            def residual_fn(x: np.ndarray) -> np.ndarray:
+                return model.air_cycle_residual(x, prev_state, time_s, dt_s)
+
+            unknowns, iters = solve_dynamic_step(residual_fn, unknowns, step_sim_cfg, jacobian_executor)
+            step = model.air_cycle_post_process(unknowns, time_s)
             step.values["newton_iterations"] = float(iters)
             step.values.update(controller_outputs)
             history.append(step.values)
             state = step.state_vector
             if idx % max(progress_interval, 1) == 0 or idx == len(times) - 1:
                 _log(
-                    f"[run] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
-                    f"m_ref={step.values['m_ref_kg_s']:.4f} kg/s | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
+                    f"[run:air_cycle] t={time_s / 60.0:.2f} min | room={step.values['room_c']:.2f} C | "
+                    f"water={step.values['water_loop_c']:.2f} C | m_air={step.values['m_air_kg_s']:.4f} kg/s | "
+                    f"COP={step.values['cop_system']:.3f} | newton={iters}"
+                )
+    finally:
+        if jacobian_executor is not None:
+            jacobian_executor.shutdown()
+
+    return history
+
+
+def _run_vcc_simulation(plant_config: dict[str, Any]) -> list[dict[str, float]]:
+    sim_cfg = plant_config["simulation"]
+    model = CascadeSystemModel(plant_config)
+    progress_interval = int(sim_cfg.get("progress_interval_steps", 20))
+
+    dt_s = sim_cfg["dt_s"]
+    times = np.arange(sim_cfg["t_start_s"], sim_cfg["t_end_s"] + dt_s, dt_s)
+    unknowns = vcc_initial_vector(plant_config)
+    startup = initialize_vcc_standalone_design(plant_config, model, unknowns)
+    unknowns = startup.unknowns
+    startup_snapshot = startup.snapshot
+
+    state_values = [unknowns[0]]
+    if model.high_pressure_receiver_enabled():
+        state_values.append(float(unknowns[5]))
+    if model.lpr_subcooling_control_enabled():
+        subcooling_idx = 5 + (1 if model.high_pressure_receiver_enabled() else 0)
+        state_values.append(float(unknowns[subcooling_idx]))
+    state = np.array(state_values, dtype=float)
+    history: list[dict[str, float]] = []
+    control: ControlSystem | None = None
+    jacobian_workers = max(1, int(sim_cfg.get("jacobian_workers", 1)))
+    receiver_cfg = _receiver_config(plant_config)
+    state_lower_bounds = [-3.15, -73.15, 0.0, 1.0e-6, 1.0e-6]
+    state_upper_bounds = [86.85, 46.85, 90.0, 5.0, 5.0]
+    state_step_scales = [10.0, 5.0, 10.0, 0.01, 0.01]
+    residual_scales = [1.0, 1.0e5, 0.1, 0.1, 0.1]
+    if model.high_pressure_receiver_enabled():
+        state_lower_bounds.append(float(receiver_cfg.get("mass_min_kg", 0.0)))
+        state_upper_bounds.append(float(receiver_cfg.get("mass_max_kg", receiver_cfg.get("maximum_mass_kg", 100.0))))
+        state_step_scales.append(float(receiver_cfg.get("mass_step_scale_kg", max(abs(float(unknowns[5])), 0.1))))
+        residual_scales.append(float(receiver_cfg.get("mass_residual_scale_kg", 0.1)))
+    if model.lpr_subcooling_control_enabled():
+        lpr_cfg = _low_pressure_receiver_config(plant_config)
+        subcooling_idx = 5 + (1 if model.high_pressure_receiver_enabled() else 0)
+        state_lower_bounds.append(float(lpr_cfg.get("subcooling_min_k", 0.0)))
+        state_upper_bounds.append(float(lpr_cfg.get("subcooling_max_k", 30.0)))
+        state_step_scales.append(float(lpr_cfg.get("subcooling_step_scale_k", max(abs(float(unknowns[subcooling_idx])), 1.0))))
+        residual_scales.append(float(lpr_cfg.get("subcooling_residual_scale_k", 1.0)))
+    step_sim_cfg = {
+        **sim_cfg,
+        "state_lower_bounds": state_lower_bounds,
+        "state_upper_bounds": state_upper_bounds,
+        "state_step_scales": state_step_scales,
+        "residual_scales": residual_scales,
+    }
+
+    _log(f"[run:vcc] steps={len(times) - 1} dt={dt_s:.1f}s interval={progress_interval}")
+    jacobian_executor = ThreadPoolExecutor(max_workers=jacobian_workers) if jacobian_workers > 1 else None
+    try:
+        for idx, time_s in enumerate(times):
+            if idx == 0:
+                step = model.vcc_post_process(unknowns, time_s)
+                step.values["startup_initialization_enabled"] = float(sim_cfg.get("startup_initialization", {}).get("enabled", False))
+                step.values["startup_iterations"] = float(startup.iterations)
+                step.values["startup_newton_iterations"] = float(startup.iterations)
+                step.values["startup_cost"] = startup.cost
+                for key, value in startup_snapshot.items():
+                    if key.startswith("startup_solved_"):
+                        step.values[key] = value
+                step.values["newton_iterations"] = 0.0
+                history.append(step.values)
+                state = step.state_vector
+                model.reset_receiver_inlet_flow(step.values.get("compressor_map_flow_kg_s", step.values["m_ref_kg_s"]))
+                control = _filtered_control_system(plant_config, step.values)
+                _log(
+                    f"[startup:vcc] t={time_s / 60.0:.2f} min | sink={step.values['sink_c']:.2f} C | "
+                    f"tevap={step.values['tevap_c']:.2f} C | m_ref={step.values['m_ref_kg_s']:.4f} kg/s | "
+                    f"COP={step.values['cop_system']:.3f}"
+                )
+                continue
+
+            prev_state = state.copy()
+            controller_outputs = control.update(history[-1], plant_config, dt_s) if control is not None else {}
+
+            def residual_fn(x: np.ndarray) -> np.ndarray:
+                return model.vcc_residual(x, prev_state, time_s, dt_s)
+
+            unknowns, iters = solve_dynamic_step(residual_fn, unknowns, step_sim_cfg, jacobian_executor)
+            step = model.vcc_post_process(unknowns, time_s)
+            step.values["newton_iterations"] = float(iters)
+            step.values.update(controller_outputs)
+            history.append(step.values)
+            state = step.state_vector
+            model.advance_receiver_inlet_flow(step.values.get("compressor_map_flow_kg_s", step.values["m_ref_kg_s"]), dt_s)
+            if idx % max(progress_interval, 1) == 0 or idx == len(times) - 1:
+                _log(
+                    f"[run:vcc] t={time_s / 60.0:.2f} min | sink={step.values['sink_c']:.2f} C | "
+                    f"tevap={step.values['tevap_c']:.2f} C | m_ref={step.values['m_ref_kg_s']:.4f} kg/s | "
                     f"COP={step.values['cop_system']:.3f} | newton={iters}"
                 )
     finally:
@@ -1482,53 +2421,48 @@ def save_plot(history: list[dict[str, float]], plot_file: str | Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     t_min = np.array([row["time_s"] for row in history]) / 60.0
-    room_c = np.array([row["room_c"] for row in history])
-    dock_c = np.array([row["dock_c"] for row in history])
-    t3_c = np.array([row["t3_c"] for row in history])
-    t5_c = np.array([row["t5_c"] for row in history])
-    m_ref_kg_s = np.array([row["m_ref_kg_s"] for row in history])
-    m_air_kg_s = np.array([row["m_air_kg_s"] for row in history])
-    cop = np.array([row["cop_system"] for row in history])
+    def temperature_spec(kelvin_key: str, celsius_key: str, label: str) -> tuple[str, str, str]:
+        if any(kelvin_key in row for row in history):
+            return (kelvin_key, label, "Temperature [K]")
+        return (celsius_key, label, "Temperature [C]")
 
-    fig, axes = plt.subplots(7, 1, figsize=(10, 17), sharex=True)
+    series_specs = [
+        temperature_spec("refrigerating_temperature_k", "refrigerating_temperature_c", "Refrigerating"),
+        temperature_spec("room_k", "room_c", "Room"),
+        temperature_spec("dock_k", "dock_c", "Loading dock"),
+        temperature_spec("water_loop_k", "water_loop_c", "Water loop"),
+        temperature_spec("sink_k", "sink_c", "Sink"),
+        temperature_spec("tevap_k", "tevap_c", "Evaporating"),
+        temperature_spec("tcond_k", "tcond_c", "Condensing"),
+        temperature_spec("t3_k", "t3_c", "Air after cascade exchanger"),
+        temperature_spec("t5_k", "t5_c", "Air entering room"),
+        ("m_ref_kg_s", "Refrigerant mass flow", "Mass Flow [kg/s]"),
+        ("m_air_kg_s", "Air mass flow", "Mass Flow [kg/s]"),
+        ("cop_system", "COP", "COP"),
+    ]
+    plotted_series: list[tuple[str, str, str, np.ndarray]] = []
+    for key, label, ylabel in series_specs:
+        if not any(key in row for row in history):
+            continue
+        values = np.array([float(row.get(key, np.nan)) for row in history], dtype=float)
+        if np.all(np.isnan(values)):
+            continue
+        plotted_series.append((key, label, ylabel, values))
+
+    if not plotted_series:
+        plotted_series.append(("time_s", "Time", "Time [min]", t_min))
+
+    fig, axes = plt.subplots(len(plotted_series), 1, figsize=(10, max(4, 2.4 * len(plotted_series))), sharex=True)
+    axes = np.atleast_1d(axes)
     for ax in axes:
         ax.ticklabel_format(axis="y", useOffset=False)
 
-    axes[0].plot(t_min, room_c, label="Room")
-    axes[0].set_ylabel("Temperature [C]")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(t_min, dock_c, label="Loading dock")
-    axes[1].set_ylabel("Temperature [C]")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(t_min, t3_c, label="Air after cascade exchanger")
-    axes[2].set_ylabel("Temperature [C]")
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-
-    axes[3].plot(t_min, t5_c, label="Air entering room")
-    axes[3].set_ylabel("Temperature [C]")
-    axes[3].legend()
-    axes[3].grid(True, alpha=0.3)
-
-    axes[4].plot(t_min, m_ref_kg_s, label="Refrigerant mass flow")
-    axes[4].set_ylabel("Mass Flow [kg/s]")
-    axes[4].legend()
-    axes[4].grid(True, alpha=0.3)
-
-    axes[5].plot(t_min, m_air_kg_s, label="Air mass flow")
-    axes[5].set_ylabel("Mass Flow [kg/s]")
-    axes[5].legend()
-    axes[5].grid(True, alpha=0.3)
-
-    axes[6].plot(t_min, cop, label="COP")
-    axes[6].set_xlabel("Time [min]")
-    axes[6].set_ylabel("COP")
-    axes[6].legend()
-    axes[6].grid(True, alpha=0.3)
+    for ax, (_, label, ylabel, values) in zip(axes, plotted_series):
+        ax.plot(t_min, values, label=label)
+        ax.set_ylabel(ylabel)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel("Time [min]")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)

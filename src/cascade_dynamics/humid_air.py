@@ -155,11 +155,17 @@ def solve_temperature_for_property(
     f_hi = residual(hi)
     expansion = 0
     while f_lo * f_hi > 0.0 and expansion < 12:
-        if abs(f_lo) < abs(f_hi):
+        if f_lo < 0.0 and f_hi < 0.0:
+            hi = min(hi + 50.0, 800.0)
+            f_hi = residual(hi)
+        elif f_lo > 0.0 and f_hi > 0.0:
+            lo = max(lo - 25.0, 40.0)
+            f_lo = residual(lo)
+        elif abs(f_lo) < abs(f_hi):
             hi = min(hi + 50.0, 800.0)
             f_hi = residual(hi)
         else:
-            lo = max(lo - 25.0, 80.0)
+            lo = max(lo - 25.0, 40.0)
             f_lo = residual(lo)
         expansion += 1
     if f_lo * f_hi > 0.0:

@@ -1,0 +1,39 @@
+{
+  "mapping": {
+    "Data_Test1_yang.csv": "expander_outlet -> model t5_k",
+    "Data_Test1_yang_inlet.csv": "expander_inlet -> model t4_k"
+  },
+  "combined_score_mean_rmse_k": 5.488517387212141,
+  "outlet": {
+    "trace": "expander_outlet",
+    "experiment_file": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+    "model_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation.csv",
+    "model_column": "t5_k",
+    "n_points": 74,
+    "time_min_first": 2.0308503216804894,
+    "time_min_last": 119.67661421595224,
+    "rmse_k": 7.244053032075011,
+    "mae_k": 4.755897605510585,
+    "mean_error_k": 0.3081376098229152,
+    "max_abs_error_k": 30.002129533046684,
+    "final_experiment_k": 105.21175633591062,
+    "final_model_k": 107.82358803430016,
+    "final_error_k": 2.611831698389537
+  },
+  "inlet": {
+    "trace": "expander_inlet",
+    "experiment_file": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv",
+    "model_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation.csv",
+    "model_column": "t4_k",
+    "n_points": 76,
+    "time_min_first": 2.1463230978772394,
+    "time_min_last": 119.67661421595224,
+    "rmse_k": 3.732981742349271,
+    "mae_k": 3.2078180729453596,
+    "mean_error_k": -3.0294545971036935,
+    "max_abs_error_k": 10.785524434388293,
+    "final_experiment_k": 136.6490818298969,
+    "final_model_k": 133.9621692183569,
+    "final_error_k": -2.686912611539981
+  }
+}

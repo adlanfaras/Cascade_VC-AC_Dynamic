@@ -1,0 +1,16 @@
+{
+  "trace": "expander_outlet",
+  "experiment_file": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+  "model_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation.csv",
+  "model_column": "t5_k",
+  "n_points": 74,
+  "time_min_first": 2.0308503216804894,
+  "time_min_last": 119.67661421595224,
+  "rmse_k": 7.244053032075011,
+  "mae_k": 4.755897605510585,
+  "mean_error_k": 0.3081376098229152,
+  "max_abs_error_k": 30.002129533046684,
+  "final_experiment_k": 105.21175633591062,
+  "final_model_k": 107.82358803430016,
+  "final_error_k": 2.611831698389537
+}

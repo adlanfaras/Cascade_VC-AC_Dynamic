@@ -144,9 +144,12 @@ def run_case_from_config_path(
     jacobian_workers: int | None = None,
     property_backend: str | None = None,
     refprop_path: str | None = None,
+    system_mode: str | None = None,
 ) -> CaseResult:
     base_config = load_config(config_path)
     name, config = build_case_config(base_config, door_open_duration_s, run_version)
+    if system_mode is not None:
+        config.setdefault("system", {})["mode"] = system_mode
     if jacobian_workers is not None:
         config["simulation"]["jacobian_workers"] = max(1, int(jacobian_workers))
     fluids_cfg = config.setdefault("fluids", {})
@@ -166,10 +169,11 @@ def run_cases(
     jacobian_workers: int | None = None,
     property_backend: str | None = None,
     refprop_path: str | None = None,
+    system_mode: str | None = None,
 ) -> list[CaseResult]:
     if workers <= 1 or len(door_open_durations_s) <= 1:
         return [
-            run_case_from_config_path(config_path, duration, run_version, jacobian_workers, property_backend, refprop_path)
+            run_case_from_config_path(config_path, duration, run_version, jacobian_workers, property_backend, refprop_path, system_mode)
             for duration in door_open_durations_s
         ]
 
@@ -184,6 +188,7 @@ def run_cases(
                 jacobian_workers,
                 property_backend,
                 refprop_path,
+                system_mode,
             ): duration
             for duration in door_open_durations_s
         }

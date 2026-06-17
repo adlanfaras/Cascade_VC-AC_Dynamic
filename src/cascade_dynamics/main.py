@@ -11,24 +11,48 @@ from .simulation import run_simulation, save_csv, save_plot
 
 
 def _print_final_state(last: dict[str, float], plot_file: str | Path, csv_file: str | Path) -> None:
+    def maybe(label: str, key: str, scale: float = 1.0, suffix: str = "") -> None:
+        value = last.get(key)
+        if value is None:
+            return
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return
+        if numeric != numeric:
+            return
+        print(f"  {label:<22}: {numeric / scale:.4g}{suffix}")
+
+    def maybe_temperature(label: str, kelvin_key: str, celsius_key: str) -> None:
+        if kelvin_key in last:
+            maybe(label, kelvin_key, suffix=" K")
+        else:
+            maybe(label, celsius_key, suffix=" C")
+
     print("Final dynamic state")
-    print(f"  Room temperature     : {last['room_c']:.2f} C")
-    print(f"  Dock temperature     : {last['dock_c']:.2f} C")
-    print(f"  Sink temperature     : {last['sink_c']:.2f} C")
-    print(f"  Cooling capacity     : {last['q_room_w'] / 1000.0:.2f} kW")
-    print(f"  Dock evaporator duty : {last['q_dock_w'] / 1000.0:.2f} kW")
-    print(f"  Useful cooling total : {last['q_useful_w'] / 1000.0:.2f} kW")
-    print(f"  Cascade duty         : {last['q_cascade_w'] / 1000.0:.2f} kW")
-    print(f"  Condenser duty       : {last['q_cond_w'] / 1000.0:.2f} kW")
-    print(f"  NH3 compressor work  : {last['w_ref_comp_w'] / 1000.0:.2f} kW")
-    print(f"  NH3 superheat        : {last['refrigerant_superheat_k']:.2f} K")
-    print(f"  NH3 isentropic work  : {last['w_ref_isentropic_w'] / 1000.0:.2f} kW")
-    print(f"  Air input power      : {last['w_air_input_w'] / 1000.0:.2f} kW")
-    print(f"  System COP           : {last['cop_system']:.3f}")
-    print(f"  Room-only COP        : {last['cop_room_only']:.3f}")
-    print(f"  Dry-air massflow     : {last['m_air_kg_s']:.4f} kg/s")
-    print(f"  Ice at air outlet    : {last['ice_mass_flow_kg_s']:.4f} kg/s")
-    print(f"  Refrigerant massflow : {last['m_ref_kg_s']:.4f} kg/s")
+    maybe_temperature("Refrigerating temp", "refrigerating_temperature_k", "refrigerating_temperature_c")
+    maybe_temperature("Room temperature", "room_k", "room_c")
+    maybe_temperature("Dock temperature", "dock_k", "dock_c")
+    maybe_temperature("Sink temperature", "sink_k", "sink_c")
+    maybe_temperature("Water loop temp", "water_loop_k", "water_loop_c")
+    maybe_temperature("Evaporating temp", "tevap_k", "tevap_c")
+    maybe_temperature("Condensing temp", "tcond_k", "tcond_c")
+    maybe("Cooling capacity", "q_room_w", scale=1000.0, suffix=" kW")
+    maybe("Dock evaporator duty", "q_dock_w", scale=1000.0, suffix=" kW")
+    maybe("Useful cooling total", "q_useful_w", scale=1000.0, suffix=" kW")
+    maybe("Cascade duty", "q_cascade_w", scale=1000.0, suffix=" kW")
+    maybe("Condenser/reject duty", "q_cond_w", scale=1000.0, suffix=" kW")
+    maybe("NH3 compressor work", "w_ref_comp_w", scale=1000.0, suffix=" kW")
+    maybe("NH3 superheat", "refrigerant_superheat_k", suffix=" K")
+    maybe("NH3 isentropic work", "w_ref_isentropic_w", scale=1000.0, suffix=" kW")
+    maybe("Air input power", "w_air_input_w", scale=1000.0, suffix=" kW")
+    maybe("System COP", "cop_system")
+    maybe("Room-only COP", "cop_room_only")
+    maybe("Dry-air massflow", "m_air_kg_s", suffix=" kg/s")
+    maybe("Ice at air outlet", "ice_mass_flow_kg_s", suffix=" kg/s")
+    maybe("Refrigerant massflow", "m_ref_kg_s", suffix=" kg/s")
+    maybe("Receiver mass", "receiver_mass_kg", suffix=" kg")
+    maybe("Receiver fill", "receiver_liquid_fill_fraction")
     print(f"  Plot saved to        : {Path(plot_file).resolve()}")
     print(f"  CSV saved to         : {Path(csv_file).resolve()}")
 
@@ -83,10 +107,15 @@ def main() -> None:
         help="Append a stable version tag to output files, e.g. 2 creates *_2.csv and rerunning 2 overwrites it.",
     )
     parser.add_argument(
+        "--system-mode",
+        choices=("cascade", "air_cycle", "vcc"),
+        help="Override the config system mode. Use air_cycle or vcc for standalone validation runs.",
+    )
+    parser.add_argument(
         "--property-backend",
         choices=("coolprop", "refprop"),
-        default="coolprop",
-        help="Thermophysical property backend for the refrigerant cycle.",
+        default="refprop",
+        help="Thermophysical property backend for the refrigerant cycle. Default: refprop.",
     )
     parser.add_argument(
         "--refprop-path",
@@ -98,6 +127,8 @@ def main() -> None:
     door_durations = _door_durations_from_args(args)
     if door_durations is None:
         cfg = load_config(args.config)
+        if args.system_mode is not None:
+            cfg.setdefault("system", {})["mode"] = args.system_mode
         if args.jacobian_workers is not None:
             cfg["simulation"]["jacobian_workers"] = max(1, args.jacobian_workers)
         cfg.setdefault("fluids", {})["property_backend"] = args.property_backend
@@ -118,6 +149,7 @@ def main() -> None:
             args.jacobian_workers,
             args.property_backend,
             args.refprop_path if args.property_backend == "refprop" else None,
+            args.system_mode,
         )
         _print_case_result(result)
         return
@@ -137,6 +169,7 @@ def main() -> None:
         jacobian_workers=args.jacobian_workers,
         property_backend=args.property_backend,
         refprop_path=args.refprop_path if args.property_backend == "refprop" else None,
+        system_mode=args.system_mode,
     )
     for result in results:
         _print_case_result(result)
