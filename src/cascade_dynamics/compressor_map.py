@@ -6,6 +6,8 @@ import numpy as np
 
 
 GRAVITY_M_S2 = 9.80665
+FT_TO_M = 0.3048
+CFM_TO_M3_S = 0.028316846592 / 60.0
 AMMONIA_DESIGN_SPEED_RPM = 1450.0
 AMMONIA_MAP_BASE_RPM = 1533.0
 AMMONIA_MAP_VALIDITY = {
@@ -13,34 +15,53 @@ AMMONIA_MAP_VALIDITY = {
     "tc_K": (283.15, 319.85),
     "N_rpm": (1226.0, 1610.0),
 }
+AMMONIA_ETA_IS_MAP_VALIDITY = {
+    **AMMONIA_MAP_VALIDITY,
+    "N_rpm": (1250.0, 1750.0),
+}
 AMMONIA_ETA_IS_COEFFS_BY_SPEED = {
-    1226.0: np.array(
+    1250.0: np.array(
         [
-            +6.00471725e-01,
-            +1.43629073e-02,
-            +1.29304633e-02,
-            +8.05894049e-04,
-            -4.81910100e-04,
-            -3.79477563e-04,
-            +1.73999281e-05,
-            -1.75037004e-05,
-            +5.28832918e-06,
-            +4.28383471e-06,
+            +6.00702395e-01,
+            +1.36699385e-02,
+            +1.31173441e-02,
+            +9.86150606e-04,
+            -5.21593953e-04,
+            -3.88588098e-04,
+            +2.14786775e-05,
+            -2.02342241e-05,
+            +4.67200260e-06,
+            +4.30050326e-06,
         ],
         dtype=float,
     ),
-    1380.0: np.array(
+    1300.0: np.array(
         [
-            +5.90125311e-01,
-            +1.41154276e-02,
-            +1.27076653e-02,
-            +7.92008111e-04,
-            -4.73606559e-04,
-            -3.72938983e-04,
-            +1.71001190e-05,
-            -1.72021033e-05,
-            +5.19720875e-06,
-            +4.21002220e-06,
+            +5.97164214e-01,
+            +1.35894215e-02,
+            +1.30400819e-02,
+            +9.80342106e-04,
+            -5.18521725e-04,
+            -3.86299285e-04,
+            +2.13521665e-05,
+            -2.01150430e-05,
+            +4.64448416e-06,
+            +4.27517298e-06,
+        ],
+        dtype=float,
+    ),
+    1350.0: np.array(
+        [
+            +5.93942220e-01,
+            +1.35160999e-02,
+            +1.29697243e-02,
+            +9.75052680e-04,
+            -5.15724047e-04,
+            -3.84215011e-04,
+            +2.12369611e-05,
+            -2.00065125e-05,
+            +4.61942489e-06,
+            +4.25210633e-06,
         ],
         dtype=float,
     ),
@@ -59,33 +80,63 @@ AMMONIA_ETA_IS_COEFFS_BY_SPEED = {
         ],
         dtype=float,
     ),
-    1533.0: np.array(
+    1500.0: np.array(
         [
-            +5.83747534e-01,
-            +1.39628752e-02,
-            +1.25703272e-02,
-            +7.83448486e-04,
-            -4.68488058e-04,
-            -3.68908447e-04,
-            +1.69153096e-05,
-            -1.70161916e-05,
-            +5.14103993e-06,
-            +4.16452240e-06,
+            +5.86777020e-01,
+            +1.33530444e-02,
+            +1.28132602e-02,
+            +9.63289840e-04,
+            -5.09502455e-04,
+            -3.79579918e-04,
+            +2.09807627e-05,
+            -1.97651579e-05,
+            +4.56369707e-06,
+            +4.20080977e-06,
         ],
         dtype=float,
     ),
-    1610.0: np.array(
+    1550.0: np.array(
         [
-            +5.81269028e-01,
-            +1.39035908e-02,
-            +1.25169554e-02,
-            +7.80122079e-04,
-            -4.66498927e-04,
-            -3.67342116e-04,
-            +1.68434897e-05,
-            -1.69439434e-05,
-            +5.11921183e-06,
-            +4.14684045e-06,
+            +5.85204946e-01,
+            +1.33172694e-02,
+            +1.27789313e-02,
+            +9.60709024e-04,
+            -5.08137412e-04,
+            -3.78562960e-04,
+            +2.09245517e-05,
+            -1.97122037e-05,
+            +4.55147016e-06,
+            +4.18955509e-06,
+        ],
+        dtype=float,
+    ),
+    1650.0: np.array(
+        [
+            +5.81926329e-01,
+            +1.32426592e-02,
+            +1.27073372e-02,
+            +9.55326642e-04,
+            -5.05290567e-04,
+            -3.76442057e-04,
+            +2.08073217e-05,
+            -1.96017659e-05,
+            +4.52597051e-06,
+            +4.16608307e-06,
+        ],
+        dtype=float,
+    ),
+    1750.0: np.array(
+        [
+            +5.80210812e-01,
+            +1.34146389e-02,
+            +1.25159428e-02,
+            +9.58580172e-04,
+            -5.15904236e-04,
+            -3.72173199e-04,
+            +2.08345420e-05,
+            -1.96345272e-05,
+            +4.69705271e-06,
+            +4.13552780e-06,
         ],
         dtype=float,
     ),
@@ -161,6 +212,128 @@ AIR_SPEED_MAP_COEFFS = np.array(
     ],
     dtype=float,
 )
+AIR_PERFORMANCE_MAP_VALIDITY = {
+    "H_ft": (4672.15160070, 7266.14783801),
+    "N_rpm": (10000.0, 18000.0),
+}
+AIR_PERFORMANCE_MAP_MODEL_KEYS = {
+    "air_cycle_head_speed_map",
+    "air_cycle_performance_map",
+    "air_performance_map",
+    "head_speed_efficiency_map",
+    "polynomial_head_speed_efficiency_map",
+    "polynomial_volumetric_flow_head_speed",
+    "polynomial_volumetric_flow_head_speed_constant_mass_flow",
+}
+AIR_PERFORMANCE_FLOW_COEFFS = np.array(
+    [
+        [6260.07656704, 2443.11018227, -1152.95137572],
+        [-1645.15302911, 3603.48614993, -3263.38873386],
+        [-1738.74759350, 4160.94639829, -509.38360516],
+        [-76.95788744, -783.65492662, -1378.89842798],
+        [-2587.05248398, -196.30218575, 3182.85887653],
+    ],
+    dtype=float,
+)
+AIR_PERFORMANCE_ETA_COEFFS = np.array(
+    [
+        [0.75271183, 0.24757091, -0.23958339],
+        [-0.16030633, 1.11908541, -0.92597117],
+        [-0.47320151, 1.71536997, -0.99329458],
+        [-0.19048862, 0.78658822, -0.94729654],
+        [-0.43217236, 0.26159686, 0.25848148],
+    ],
+    dtype=float,
+)
+
+
+def _normalized_model_key(model: str | None) -> str:
+    return str(model or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _normalized_air_performance_inputs(
+    head_ft: float,
+    speed_rpm: float,
+    *,
+    check_range: bool = False,
+    clip_inputs: bool = True,
+) -> tuple[float, float, float, float]:
+    head = float(head_ft)
+    speed = float(speed_rpm)
+    h_min, h_max = AIR_PERFORMANCE_MAP_VALIDITY["H_ft"]
+    n_min, n_max = AIR_PERFORMANCE_MAP_VALIDITY["N_rpm"]
+    if check_range:
+        for key, value in (("H_ft", head), ("N_rpm", speed)):
+            lo, hi = AIR_PERFORMANCE_MAP_VALIDITY[key]
+            if value < lo or value > hi:
+                raise ValueError(f"{key} outside valid range {lo} to {hi}")
+    if clip_inputs:
+        head = float(np.clip(head, h_min, h_max))
+        speed = float(np.clip(speed, n_min, n_max))
+    h_norm = 2.0 * (head - h_min) / (h_max - h_min) - 1.0
+    n_norm = 2.0 * (speed - n_min) / (n_max - n_min) - 1.0
+    return head, speed, h_norm, n_norm
+
+
+def _evaluate_air_performance_polynomial(coeffs: np.ndarray, h_norm: float, n_norm: float) -> float:
+    value = 0.0
+    h_power = 1.0
+    for h_idx in range(coeffs.shape[0]):
+        n_power = 1.0
+        for n_idx in range(coeffs.shape[1]):
+            value += float(coeffs[h_idx, n_idx]) * h_power * n_power
+            n_power *= n_norm
+        h_power *= h_norm
+    return float(value)
+
+
+def _air_performance_flow_speed_derivative_cfm_per_rpm(h_norm: float, n_norm: float) -> float:
+    d_q_d_n_norm = 0.0
+    h_power = 1.0
+    for h_idx in range(AIR_PERFORMANCE_FLOW_COEFFS.shape[0]):
+        n_power = 1.0
+        for n_idx in range(1, AIR_PERFORMANCE_FLOW_COEFFS.shape[1]):
+            d_q_d_n_norm += float(n_idx) * float(AIR_PERFORMANCE_FLOW_COEFFS[h_idx, n_idx]) * h_power * n_power
+            n_power *= n_norm
+        h_power *= h_norm
+    n_min, n_max = AIR_PERFORMANCE_MAP_VALIDITY["N_rpm"]
+    return d_q_d_n_norm * 2.0 / (n_max - n_min)
+
+
+def air_performance_map_model(model: str) -> bool:
+    return _normalized_model_key(model) in AIR_PERFORMANCE_MAP_MODEL_KEYS
+
+
+def air_compressor_performance_map(
+    config: dict[str, Any],
+    isentropic_head_j_kg: float,
+    speed_rpm: float | None = None,
+) -> dict[str, float]:
+    speed = float(config.get("speed_rpm", 15000.0) if speed_rpm is None else speed_rpm)
+    head_ft = float(isentropic_head_j_kg) / GRAVITY_M_S2 / FT_TO_M
+    head_eval_ft, speed_eval_rpm, h_norm, n_norm = _normalized_air_performance_inputs(
+        head_ft,
+        speed,
+        check_range=bool(config.get("check_range", False)),
+        clip_inputs=bool(config.get("clip_to_map_range", True)),
+    )
+    q_cfm = _evaluate_air_performance_polynomial(AIR_PERFORMANCE_FLOW_COEFFS, h_norm, n_norm)
+    eta_is = _evaluate_air_performance_polynomial(AIR_PERFORMANCE_ETA_COEFFS, h_norm, n_norm)
+    q_cfm = float(np.clip(q_cfm, float(config.get("q_min_cfm", 0.0)), float(config.get("q_max_cfm", 1.0e9))))
+    eta_is = float(np.clip(eta_is, float(config.get("eta_is_min", 1.0e-6)), float(config.get("eta_is_max", 1.0))))
+    d_q_d_speed_cfm_per_rpm = _air_performance_flow_speed_derivative_cfm_per_rpm(h_norm, n_norm)
+    return {
+        "head_is_ft": head_ft,
+        "head_is_eval_ft": head_eval_ft,
+        "speed_rpm": speed,
+        "speed_eval_rpm": speed_eval_rpm,
+        "volumetric_flow_cfm": q_cfm,
+        "volumetric_flow_m3_s": q_cfm * CFM_TO_M3_S,
+        "eta_is": eta_is,
+        "d_q_d_speed_cfm_per_rpm": d_q_d_speed_cfm_per_rpm,
+        "d_q_d_speed_m3_s_per_rpm": d_q_d_speed_cfm_per_rpm * CFM_TO_M3_S,
+    }
+
 
 SCREW_COMPRESSOR_PRESSURE_RATIO_MAPS = {
     "bitzer_osha7462_k": {
@@ -272,7 +445,10 @@ def screw_compressor_pressure_ratio_map(config: dict[str, Any], pressure_ratio: 
     preset = SCREW_COMPRESSOR_PRESSURE_RATIO_MAPS.get(preset_key, {})
 
     eta_is_coeffs = config.get("eta_is_coefficients", preset.get("eta_is"))
-    eta_v_coeffs = config.get("eta_v_coefficients", config.get("volumetric_efficiency_coefficients", preset.get("eta_v")))
+    eta_v_coeffs = config.get(
+        "eta_v_coefficients",
+        config.get("volumetric_efficiency_coefficients", preset.get("eta_v")),
+    )
     q_oil_coeffs = config.get("q_oil_coefficients", preset.get("q_oil_w"))
 
     eta_is = float(config.get("eta_is", 1.0))
@@ -329,7 +505,7 @@ def ammonia_isentropic_efficiency_map(
             ("tc_K", tc),
             ("N_rpm", speed),
         ):
-            lo, hi = AMMONIA_MAP_VALIDITY[key]
+            lo, hi = AMMONIA_ETA_IS_MAP_VALIDITY[key]
             if value < lo or value > hi:
                 raise ValueError(f"{key} outside valid range {lo} to {hi}")
 
@@ -363,8 +539,7 @@ def _is_ammonia_fluid(fluid_name: str) -> bool:
 
 
 def compressor_uses_ammonia_eta_is_map(config: dict[str, Any], fluid_name: str) -> bool:
-    eta_model = str(config.get("eta_is_model", config.get("isentropic_efficiency_model", ""))).strip().lower()
-    eta_model = eta_model.replace(" ", "_")
+    eta_model = _normalized_model_key(config.get("eta_is_model", config.get("isentropic_efficiency_model", "")))
     if eta_model in AMMONIA_ETA_IS_MAP_MODEL_KEYS:
         return True
     if eta_model in {"constant", "fixed", "scalar", "fixed_scalar"}:
@@ -436,7 +611,10 @@ def volumetric_flow_from_head(config: dict[str, Any], head_m: float) -> float:
     head_max_m = float(config.get("head_max_m", head_m))
     head_eval_m = min(max(head_m, head_min_m), head_max_m)
 
-    if model in {
+    if air_performance_map_model(model):
+        result = air_compressor_performance_map(config, head_eval_m * GRAVITY_M_S2)
+        volumetric_flow_m3_s = result["volumetric_flow_m3_s"]
+    elif model in {
         "polynomial_volumetric_flow_head_speed",
         "polynomial_volumetric_flow_head_speed_constant_mass_flow",
         "polynomial_volumetric_flow_head_speed_damper",

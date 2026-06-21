@@ -1,0 +1,16 @@
+{
+  "trace": "expander_inlet",
+  "experiment_file": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv",
+  "model_file": "outputs\\yang_validation_counterflow_6cell.csv",
+  "model_column": "t4_k",
+  "n_points": 76,
+  "time_min_first": 2.1463230978772394,
+  "time_min_last": 119.67661421595224,
+  "rmse_k": 2.6374282964014983,
+  "mae_k": 1.6812224767682973,
+  "mean_error_k": -1.2953128615274931,
+  "max_abs_error_k": 9.8233554959875,
+  "final_experiment_k": 136.6490818298969,
+  "final_model_k": 136.15368831421281,
+  "final_error_k": -0.4953935156840714
+}

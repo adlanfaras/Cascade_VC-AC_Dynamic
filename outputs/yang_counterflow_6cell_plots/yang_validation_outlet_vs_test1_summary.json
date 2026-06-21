@@ -1,0 +1,16 @@
+{
+  "trace": "expander_outlet",
+  "experiment_file": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+  "model_file": "outputs\\yang_validation_counterflow_6cell.csv",
+  "model_column": "t5_k",
+  "n_points": 74,
+  "time_min_first": 2.0308503216804894,
+  "time_min_last": 119.67661421595224,
+  "rmse_k": 7.801884629070166,
+  "mae_k": 5.969258752452545,
+  "mean_error_k": 1.7073505264147457,
+  "max_abs_error_k": 29.72926139411615,
+  "final_experiment_k": 105.21175633591062,
+  "final_model_k": 109.58749968516862,
+  "final_error_k": 4.375743349258002
+}

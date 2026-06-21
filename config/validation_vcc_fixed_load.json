@@ -18,7 +18,7 @@
         "tcond_c": 40.0
       },
       "fixed_vcc_compressor_speed_rpm": 1450,
-      "superheat_target_k": 5.0
+      "superheat_target_k": 1.0
     }
   },
   "fluids": {

@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "message": "Both `ftol` and `xtol` termination conditions are satisfied.",
+  "nfev": 16,
+  "cost": 52642.53262574441,
+  "model": "two_lump_matrix",
+  "fit_initial_solid": false,
+  "fitted": {
+    "ua_w_k": 4999.998628822212,
+    "solid_capacitance_j_k": 200.06564747316082,
+    "hot_solid_capacitance_j_k": 100.06085125763667,
+    "cold_solid_capacitance_j_k": 100.00479621552415,
+    "initial_solid_k": 300.0
+  },
+  "metrics": {
+    "outlet_rmse_k": 75.29679309904137,
+    "inlet_rmse_k": 87.07793866220511,
+    "mean_rmse_k": 81.18736588062325,
+    "outlet_mae_k": 70.1895247161359,
+    "inlet_mae_k": 79.34030026454427,
+    "outlet_mean_error_k": 66.89206927919787,
+    "inlet_mean_error_k": 79.33425747366334,
+    "outlet_final_error_k": 92.82776339378395,
+    "inlet_final_error_k": 109.39915420534948
+  },
+  "residual_norm_k": 997.9108398549712,
+  "files": {
+    "fitted_config": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\config\\yang_validation_two_lump_matrix_fitted.json",
+    "output_csv": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation_two_lump_matrix.csv",
+    "output_plot": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation_two_lump_matrix.png",
+    "outlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+    "inlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv"
+  }
+}

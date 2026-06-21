@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "message": "`ftol` termination condition is satisfied.",
+  "nfev": 11,
+  "cost": 33497.07511943554,
+  "model": "counterflow_cells",
+  "fit_initial_solid": false,
+  "fitted": {
+    "ua_w_k": 4755.996730908769,
+    "solid_capacitance_j_k": 114.47789548370034,
+    "hot_solid_capacitance_j_k": null,
+    "cold_solid_capacitance_j_k": null,
+    "initial_solid_k": 300.0
+  },
+  "metrics": {
+    "outlet_rmse_k": 51.17490428211031,
+    "inlet_rmse_k": 56.91740827656357,
+    "mean_rmse_k": 54.04615627933694,
+    "outlet_mae_k": 47.505431802421185,
+    "inlet_mae_k": 50.735605787231194,
+    "outlet_mean_error_k": 42.890121604221136,
+    "inlet_mean_error_k": 49.60493549958684,
+    "outlet_final_error_k": 64.85786628041214,
+    "inlet_final_error_k": 74.64879781664504
+  },
+  "residual_norm_k": 663.3290171754521,
+  "files": {
+    "fitted_config": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\config\\yang_validation_counterflow_cells_fitted.json",
+    "output_csv": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation_counterflow_cells.csv",
+    "output_plot": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation_counterflow_cells.png",
+    "outlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+    "inlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv"
+  }
+}

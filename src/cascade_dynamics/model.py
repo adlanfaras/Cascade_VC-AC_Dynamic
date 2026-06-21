@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from .compressor_map import (
+    air_compressor_performance_map,
+    air_performance_map_model,
     ammonia_compressor_eta_is,
     ammonia_compressor_map,
     head_from_mass_flow,
@@ -45,12 +47,45 @@ MAP_COOLING_CAPACITY_BALANCE_MODES = {
     "map_capacity",
     "map_capacity_direct",
 }
+SCREW_PRESSURE_RATIO_COMPRESSOR_MODELS = {
+    "screw_pressure_ratio_polynomial",
+    "screw_polynomial",
+    "pressure_ratio_polynomial_screw",
+}
 DYNAMIC_UA_DEFAULT_EXPONENTS = {
     "regenerator": 0.8,
     "cascade": 0.8,
     "condenser": 0.8,
     "dock_evaporator": 0.6,
     "water_loop_air_cooler": 0.8,
+}
+LUMPED_MATRIX_REGENERATOR_MODELS = {
+    "lumped_matrix",
+    "matrix_lumped",
+    "transient_lumped_matrix",
+    "lumped_matrix_transient",
+}
+TWO_LUMP_MATRIX_REGENERATOR_MODELS = {
+    "two_lump_matrix",
+    "two_lump",
+    "two_node_matrix",
+    "two_node_lumped_matrix",
+}
+TRANSIENT_REGENERATOR_MODELS = {
+    "transient_distributed",
+    "transient_lumped",
+    "distributed_transient",
+    "yang_transient",
+    *LUMPED_MATRIX_REGENERATOR_MODELS,
+    *TWO_LUMP_MATRIX_REGENERATOR_MODELS,
+}
+LUMPED_CASCADE_EXCHANGER_MODELS = {
+    "lumped_capacitance",
+    "lumped_capacity",
+    "lumped",
+    "one_cell_lumped",
+    "one_cell_lumped_capacitance",
+    "transient_lumped",
 }
 
 
@@ -549,12 +584,20 @@ class CascadeSystemModel:
 
     def _compressor_uses_saturated_suction(self) -> bool:
         cfg = self._low_pressure_receiver_config()
-        return self.low_pressure_receiver_enabled() and bool(cfg.get("force_saturated_suction", True))
+        return self.low_pressure_receiver_enabled() and bool(cfg.get("force_saturated_suction", False))
 
     def lpr_subcooling_control_enabled(self) -> bool:
         cfg = self._low_pressure_receiver_config()
         return self.low_pressure_receiver_enabled() and bool(
             cfg.get("control_subcooling_with_eev", cfg.get("dynamic_subcooling", False))
+        )
+
+    def lpr_inventory_enabled(self) -> bool:
+        cfg = self._low_pressure_receiver_config()
+        model = str(cfg.get("model", cfg.get("inventory_model", ""))).strip().lower().replace("-", "_").replace(" ", "_")
+        return self.low_pressure_receiver_enabled() and (
+            model in {"dynamic_inventory", "liquid_inventory", "two_phase_inventory"}
+            or bool(cfg.get("liquid_inventory_enabled", cfg.get("dynamic_inventory", False)))
         )
 
     def _lpr_subcooling_target_k(self) -> float:
@@ -579,9 +622,158 @@ class CascadeSystemModel:
             return max(float(default), 0.0)
         return self._lpr_subcooling_target_k()
 
+    def _lpr_inventory_index(self, base_size: int) -> int:
+        return (
+            base_size
+            + (1 if self.high_pressure_receiver_enabled() else 0)
+            + (1 if self.lpr_subcooling_control_enabled() else 0)
+        )
+
+    def _lpr_liquid_mass_unknown(self, unknowns: np.ndarray, base_size: int, default: float = 0.0) -> float:
+        if not self.lpr_inventory_enabled():
+            return 0.0
+        idx = self._lpr_inventory_index(base_size)
+        if len(unknowns) > idx:
+            return max(float(unknowns[idx]), 0.0)
+        return max(float(default), 0.0)
+
+    def _lpr_vapor_mass_unknown(self, unknowns: np.ndarray, base_size: int, default: float = 0.0) -> float:
+        if not self.lpr_inventory_enabled():
+            return 0.0
+        idx = self._lpr_inventory_index(base_size) + 1
+        if len(unknowns) > idx:
+            return max(float(unknowns[idx]), 0.0)
+        return max(float(default), 0.0)
+
+    def _cascade_dynamic_unknown_index(self, base_size: int = 10) -> int:
+        return base_size + self._receiver_extra_residual_count()
+
+    def _cascade_dynamic_state_index(self) -> int:
+        return 4 + self._receiver_extra_residual_count()
+
+    def _cascade_regenerator_state_count(self) -> int:
+        reg_cfg = self._standalone_transient_regenerator_config()
+        if reg_cfg is None:
+            return 0
+        model = str(reg_cfg.get("model", "")).strip().lower()
+        if model in LUMPED_MATRIX_REGENERATOR_MODELS:
+            return max(1, int(reg_cfg.get("matrix_count", reg_cfg.get("cell_count", 1))))
+        if model in TWO_LUMP_MATRIX_REGENERATOR_MODELS:
+            return max(2, int(reg_cfg.get("matrix_count", reg_cfg.get("cell_count", 2))))
+        return max(1, int(reg_cfg.get("cell_count", reg_cfg.get("cells", 12))))
+
+    def _cascade_exchanger_config(self) -> dict | None:
+        vcc_cfg = self.cfg.get("vcc_cycle", {})
+        cfg = vcc_cfg.get("cascade_exchanger", vcc_cfg.get("cascade_heat_exchanger", {}))
+        if not isinstance(cfg, dict):
+            return None
+        model = str(cfg.get("model", "")).strip().lower()
+        if model not in LUMPED_CASCADE_EXCHANGER_MODELS:
+            return None
+        return cfg
+
+    def _cascade_exchanger_state_count(self) -> int:
+        cfg = self._cascade_exchanger_config()
+        if cfg is None:
+            return 0
+        return max(1, int(cfg.get("cell_count", cfg.get("cells", 1))))
+
+    def _cascade_regenerator_cells_c(self, unknowns: np.ndarray, base_size: int = 10) -> np.ndarray:
+        count = self._cascade_regenerator_state_count()
+        if count <= 0:
+            return np.array([], dtype=float)
+        start = self._cascade_dynamic_unknown_index(base_size)
+        if len(unknowns) < start + count:
+            return np.array([], dtype=float)
+        return np.asarray(unknowns[start : start + count], dtype=float)
+
+    def _cascade_exchanger_cells_c(self, unknowns: np.ndarray, base_size: int = 10) -> np.ndarray:
+        count = self._cascade_exchanger_state_count()
+        if count <= 0:
+            return np.array([], dtype=float)
+        start = self._cascade_dynamic_unknown_index(base_size) + self._cascade_regenerator_state_count()
+        if len(unknowns) < start + count:
+            return np.array([], dtype=float)
+        return np.asarray(unknowns[start : start + count], dtype=float)
+
+    def _cascade_exchanger_capacitances_j_k(self, cfg: dict, state_count: int) -> np.ndarray:
+        profile = cfg.get("solid_capacitance_profile_j_k", cfg.get("matrix_capacitance_profile_j_k"))
+        if isinstance(profile, list) and profile:
+            values = np.asarray([max(float(value), 1.0e-9) for value in profile], dtype=float)
+            if values.size >= state_count:
+                return values[:state_count]
+            return np.concatenate([values, np.full(state_count - values.size, values[-1], dtype=float)])
+        total_cap = max(float(cfg.get("solid_capacitance_j_k", cfg.get("capacitance_j_k", 1.0))), 1.0e-9)
+        return np.full(state_count, total_cap / max(state_count, 1), dtype=float)
+
+    def _evaluate_lumped_cascade_exchanger(
+        self,
+        air: dict[str, float],
+        tevap_k: float,
+        matrix_c: np.ndarray,
+        ua_result: dict[str, float],
+    ) -> dict[str, float | np.ndarray | str]:
+        cfg = self._cascade_exchanger_config()
+        if cfg is None:
+            raise ValueError("Lumped cascade exchanger configuration is not enabled.")
+
+        matrix_c = np.asarray(matrix_c, dtype=float)
+        if matrix_c.size <= 0:
+            raise ValueError("Lumped cascade exchanger requires at least one matrix temperature state.")
+        matrix_k = float(matrix_c[0] + KELVIN_OFFSET)
+        ua_total_w_k = max(float(cfg.get("ua_w_k", ua_result["ua_w_k"])), 0.0)
+        air_ua_factor = max(float(cfg.get("air_side_ua_factor", cfg.get("gas_solid_ua_factor", 2.0))), 0.0)
+        refrigerant_ua_factor = max(
+            float(cfg.get("refrigerant_side_ua_factor", cfg.get("evaporator_side_ua_factor", 2.0))),
+            0.0,
+        )
+        ua_air_w_k = max(float(cfg.get("ua_air_w_k", cfg.get("air_side_ua_w_k", air_ua_factor * ua_total_w_k))), 0.0)
+        ua_ref_w_k = max(
+            float(
+                cfg.get(
+                    "ua_refrigerant_w_k",
+                    cfg.get("refrigerant_side_ua_w_k", refrigerant_ua_factor * ua_total_w_k),
+                )
+            ),
+            0.0,
+        )
+        cp_air = max(float(cfg.get("cp_air_j_kg_k", CP_DOCK_AIR)), 1.0e-9)
+        c_air_w_k = max(float(air["m_air"]) * cp_air, 1.0e-9)
+        effectiveness = 1.0 - float(np.exp(-ua_air_w_k / c_air_w_k))
+        effectiveness = float(np.clip(effectiveness, 0.0, 1.0))
+        t2_k = float(air["t2_k"])
+        t3_k = matrix_k + (t2_k - matrix_k) * (1.0 - effectiveness)
+        q_air_to_matrix_w = c_air_w_k * (t2_k - t3_k)
+        q_matrix_to_refrigerant_w = ua_ref_w_k * (matrix_k - float(tevap_k))
+
+        ambient_k = float(cfg.get("ambient_k", self.cfg.get("boundary_conditions", {}).get("ambient_c", 30.0) + KELVIN_OFFSET))
+        heat_leak_ua_w_k = max(float(cfg.get("heat_leak_ua_w_k", 0.0)), 0.0)
+        q_leak_to_matrix_w = heat_leak_ua_w_k * (ambient_k - matrix_k)
+        matrix_net_w = q_air_to_matrix_w - q_matrix_to_refrigerant_w + q_leak_to_matrix_w
+
+        return {
+            "cascade_exchanger_model": "lumped_capacitance",
+            "t3_k": float(t3_k),
+            "q_air_to_matrix_w": float(q_air_to_matrix_w),
+            "q_refrigerant_w": float(q_matrix_to_refrigerant_w),
+            "q_matrix_net_w": np.array([matrix_net_w], dtype=float),
+            "q_heat_leak_w": float(q_leak_to_matrix_w),
+            "matrix_mean_k": matrix_k,
+            "matrix_min_k": matrix_k,
+            "matrix_max_k": matrix_k,
+            "matrix_k": np.array([matrix_k], dtype=float),
+            "cell_count": 1.0,
+            "ua_air_w_k": ua_air_w_k,
+            "ua_refrigerant_w_k": ua_ref_w_k,
+            "air_effectiveness": effectiveness,
+            "air_capacity_rate_w_k": c_air_w_k,
+        }
+
     def _receiver_extra_residual_count(self) -> int:
         return (1 if self.high_pressure_receiver_enabled() else 0) + (
             1 if self.lpr_subcooling_control_enabled() else 0
+        ) + (
+            2 if self.lpr_inventory_enabled() else 0
         )
 
     def _receiver_unknown_mass(self, unknowns: np.ndarray, default: float = 0.0) -> float:
@@ -728,6 +920,199 @@ class CascadeSystemModel:
             - float(previous_receiver_mass_kg)
             - float(dt_s) * (inlet_m_dot - float(ref["m_ref_valve"]))
         )
+
+    def _disabled_lpr_inventory(self, p_evap_pa: float, h_return_j_kg: float, t_return_k: float) -> dict[str, float]:
+        return {
+            "enabled": 0.0,
+            "volume_m3": 0.0,
+            "liquid_mass_kg": 0.0,
+            "vapor_mass_kg": 0.0,
+            "liquid_volume_m3": 0.0,
+            "vapor_volume_m3": 0.0,
+            "fill_fraction": 0.0,
+            "fill_fraction_raw": 0.0,
+            "overfill_mass_kg": 0.0,
+            "evaporator_outlet_quality": 1.0,
+            "evaporator_outlet_quality_raw": 1.0,
+            "return_superheat_k": max(float(t_return_k) - props_si("T", "P", p_evap_pa, "Q", 1.0, self.ref_fluid), 0.0),
+            "vapor_return_m_dot_kg_s": 0.0,
+            "liquid_return_m_dot_kg_s": 0.0,
+            "boil_off_m_dot_kg_s": 0.0,
+            "boil_off_heat_w": 0.0,
+            "liquid_carryover_m_dot_kg_s": 0.0,
+            "volume_residual_m3": 0.0,
+            "suction_enthalpy_j_kg": h_return_j_kg,
+            "suction_temperature_k": t_return_k,
+            "suction_superheat_k": max(float(t_return_k) - props_si("T", "P", p_evap_pa, "Q", 1.0, self.ref_fluid), 0.0),
+            "suction_vapor_quality": 1.0,
+            "rho_liquid_kg_m3": 0.0,
+            "rho_vapor_kg_m3": 0.0,
+            "h_liquid_j_kg": 0.0,
+            "h_vapor_j_kg": 0.0,
+            "h_fg_j_kg": 0.0,
+            "cp_vapor_j_kg_k": 0.0,
+        }
+
+    def _evaluate_low_pressure_receiver_inventory(
+        self,
+        liquid_mass_kg: float,
+        vapor_mass_kg: float,
+        p_evap_pa: float,
+        h_return_j_kg: float,
+        t_return_k: float,
+        m_return_kg_s: float,
+    ) -> dict[str, float]:
+        if not self.lpr_inventory_enabled():
+            return self._disabled_lpr_inventory(p_evap_pa, h_return_j_kg, t_return_k)
+
+        cfg = self._low_pressure_receiver_config()
+        volume_m3 = max(float(cfg.get("volume_m3", cfg.get("internal_volume_m3", 0.0))), 1.0e-12)
+        liquid_mass = max(float(liquid_mass_kg), 0.0)
+        vapor_mass = max(float(vapor_mass_kg), 0.0)
+
+        t_sat_k = props_si("T", "P", p_evap_pa, "Q", 1.0, self.ref_fluid)
+        rho_l = props_si("D", "P", p_evap_pa, "Q", 0.0, self.ref_fluid)
+        rho_v = props_si("D", "P", p_evap_pa, "Q", 1.0, self.ref_fluid)
+        h_l = props_si("H", "P", p_evap_pa, "Q", 0.0, self.ref_fluid)
+        h_v = props_si("H", "P", p_evap_pa, "Q", 1.0, self.ref_fluid)
+        h_fg = max(h_v - h_l, 1.0e-9)
+
+        liquid_volume_m3 = liquid_mass / max(rho_l, 1.0e-9)
+        vapor_volume_m3 = vapor_mass / max(rho_v, 1.0e-9)
+        fill_raw = liquid_volume_m3 / volume_m3
+        overfill_mass = max(liquid_mass - rho_l * volume_m3, 0.0)
+
+        quality_raw = (float(h_return_j_kg) - h_l) / h_fg
+        quality = float(np.clip(quality_raw, 0.0, 1.0))
+        m_return = max(float(m_return_kg_s), 0.0)
+        m_vapor_return = m_return if quality_raw >= 1.0 else quality * m_return
+        m_liquid_return = 0.0 if quality_raw >= 1.0 else (1.0 - quality) * m_return
+
+        return_superheat_k = max(float(t_return_k) - t_sat_k, 0.0) if quality_raw >= 1.0 else 0.0
+        cp_v = cfg.get("vapor_cp_j_kg_k", cfg.get("cp_vapor_j_kg_k"))
+        if cp_v is None:
+            cp_eval_t = max(float(t_return_k), t_sat_k + 0.25)
+            cp_v = props_si("C", "P", p_evap_pa, "T", cp_eval_t, self.ref_fluid)
+        cp_v = max(float(cp_v), 0.0)
+
+        minimum_liquid_mass = cfg.get("minimum_liquid_mass_kg")
+        if minimum_liquid_mass is None:
+            minimum_liquid_mass = float(cfg.get("minimum_liquid_fill_fraction", 0.0)) * volume_m3 * max(rho_l, 0.0)
+        smoothing_mass = cfg.get("boiloff_smoothing_mass_kg", cfg.get("liquid_availability_smoothing_mass_kg"))
+        if smoothing_mass is None:
+            smoothing_mass = float(cfg.get("boiloff_smoothing_fill_fraction", 0.002)) * volume_m3 * max(rho_l, 0.0)
+        liquid_available_fraction = float(
+            np.clip((liquid_mass - float(minimum_liquid_mass)) / max(float(smoothing_mass), 1.0e-9), 0.0, 1.0)
+        )
+
+        q_gas_w = m_vapor_return * cp_v * return_superheat_k * liquid_available_fraction
+        m_boil = q_gas_w / h_fg
+        carryover_start = float(cfg.get("carryover_fill_fraction", 1.0))
+        carryover_gain = float(cfg.get("carryover_mass_flow_gain_kg_s", 0.0))
+        m_carryover = carryover_gain * max(fill_raw - carryover_start, 0.0)
+
+        if quality_raw <= 1.0:
+            suction_h = h_v
+        elif m_vapor_return > 0.0 and m_boil > 0.0:
+            suction_h = max(h_v, float(h_return_j_kg) - m_boil * h_fg / max(m_vapor_return, 1.0e-12))
+        else:
+            suction_h = float(h_return_j_kg)
+        if suction_h <= h_v + 1.0e-6:
+            suction_t = t_sat_k
+        else:
+            suction_t = props_si("T", "P", p_evap_pa, "H", suction_h, self.ref_fluid)
+        suction_quality = 1.0
+
+        return {
+            "enabled": 1.0,
+            "volume_m3": volume_m3,
+            "liquid_mass_kg": liquid_mass,
+            "vapor_mass_kg": vapor_mass,
+            "liquid_volume_m3": liquid_volume_m3,
+            "vapor_volume_m3": vapor_volume_m3,
+            "fill_fraction": float(np.clip(fill_raw, 0.0, 1.0)),
+            "fill_fraction_raw": fill_raw,
+            "overfill_mass_kg": overfill_mass,
+            "evaporator_outlet_quality": quality,
+            "evaporator_outlet_quality_raw": quality_raw,
+            "return_superheat_k": return_superheat_k,
+            "vapor_return_m_dot_kg_s": m_vapor_return,
+            "liquid_return_m_dot_kg_s": m_liquid_return,
+            "boil_off_m_dot_kg_s": m_boil,
+            "boil_off_heat_w": q_gas_w,
+            "liquid_carryover_m_dot_kg_s": m_carryover,
+            "volume_residual_m3": liquid_volume_m3 + vapor_volume_m3 - volume_m3,
+            "suction_enthalpy_j_kg": suction_h,
+            "suction_temperature_k": suction_t,
+            "suction_superheat_k": max(suction_t - t_sat_k, 0.0),
+            "suction_vapor_quality": suction_quality,
+            "rho_liquid_kg_m3": rho_l,
+            "rho_vapor_kg_m3": rho_v,
+            "h_liquid_j_kg": h_l,
+            "h_vapor_j_kg": h_v,
+            "h_fg_j_kg": h_fg,
+            "cp_vapor_j_kg_k": cp_v,
+        }
+
+    def _lpr_inventory_balance_residuals(
+        self,
+        liquid_mass_kg: float,
+        vapor_mass_kg: float,
+        previous_liquid_mass_kg: float,
+        previous_vapor_mass_kg: float,
+        ref: dict[str, float],
+        dt_s: float,
+    ) -> list[float]:
+        lpr = ref["low_pressure_receiver_inventory"]
+        liquid_residual = (
+            float(liquid_mass_kg)
+            - float(previous_liquid_mass_kg)
+            - float(dt_s)
+            * (
+                float(lpr["liquid_return_m_dot_kg_s"])
+                - float(lpr["boil_off_m_dot_kg_s"])
+                - float(lpr["liquid_carryover_m_dot_kg_s"])
+            )
+        )
+        vapor_residual = (
+            float(vapor_mass_kg)
+            - float(previous_vapor_mass_kg)
+            - float(dt_s)
+            * (
+                float(lpr["vapor_return_m_dot_kg_s"])
+                + float(lpr["boil_off_m_dot_kg_s"])
+                - float(ref["m_ref_compressor"])
+            )
+        )
+        return [liquid_residual, vapor_residual]
+
+    def _lpr_inventory_output_values(self, ref: dict[str, float]) -> dict[str, float]:
+        return {
+            "lpr_inventory_enabled": ref["lpr_inventory_enabled"],
+            "lpr_volume_m3": ref["lpr_volume_m3"],
+            "lpr_liquid_mass_kg": ref["lpr_liquid_mass_kg"],
+            "lpr_vapor_mass_kg": ref["lpr_vapor_mass_kg"],
+            "lpr_liquid_volume_m3": ref["lpr_liquid_volume_m3"],
+            "lpr_vapor_volume_m3": ref["lpr_vapor_volume_m3"],
+            "lpr_liquid_fill_fraction": ref["lpr_liquid_fill_fraction"],
+            "lpr_liquid_fill_fraction_raw": ref["lpr_liquid_fill_fraction_raw"],
+            "lpr_overfill_mass_kg": ref["lpr_overfill_mass_kg"],
+            "lpr_volume_residual_m3": ref["lpr_volume_residual_m3"],
+            "lpr_evaporator_outlet_quality": ref["lpr_evaporator_outlet_quality"],
+            "lpr_evaporator_outlet_quality_raw": ref["lpr_evaporator_outlet_quality_raw"],
+            "lpr_return_superheat_k": ref["lpr_return_superheat_k"],
+            "lpr_vapor_return_m_dot_kg_s": ref["lpr_vapor_return_m_dot_kg_s"],
+            "lpr_liquid_return_m_dot_kg_s": ref["lpr_liquid_return_m_dot_kg_s"],
+            "lpr_boil_off_m_dot_kg_s": ref["lpr_boil_off_m_dot_kg_s"],
+            "lpr_boil_off_heat_w": ref["lpr_boil_off_heat_w"],
+            "lpr_liquid_carryover_m_dot_kg_s": ref["lpr_liquid_carryover_m_dot_kg_s"],
+            "lpr_suction_enthalpy_j_kg": ref["lpr_suction_enthalpy_j_kg"],
+            "lpr_suction_temperature_k": ref["lpr_suction_temperature_k"],
+            "lpr_suction_superheat_k": ref["lpr_suction_superheat_k"],
+            "lpr_suction_vapor_quality": ref["lpr_suction_vapor_quality"],
+            "lpr_h_fg_j_kg": ref["lpr_h_fg_j_kg"],
+            "lpr_cp_vapor_j_kg_k": ref["lpr_cp_vapor_j_kg_k"],
+        }
 
     def _lpr_subcooling_balance_residual(
         self,
@@ -950,7 +1335,10 @@ class CascadeSystemModel:
             max(0.0, 1.0e-6 - m_ref_dock),
             max(0.0, self.effective_refrigerant_mass_flow(m_ref_cascade, m_ref_dock) - 5.0),
         ]
-        residual_size = 10 + self._receiver_extra_residual_count()
+        residual_size = max(
+            10 + self._receiver_extra_residual_count(),
+            int(np.asarray(unknowns, dtype=float).size),
+        )
         if self.high_pressure_receiver_enabled():
             receiver_mass = self._receiver_unknown_mass(unknowns)
             receiver_cfg = self._receiver_config()
@@ -970,6 +1358,32 @@ class CascadeSystemModel:
                     max(0.0, subcooling_k - float(lpr_cfg.get("subcooling_max_k", 30.0))),
                 ]
             )
+        if self.lpr_inventory_enabled():
+            lpr_cfg = self._low_pressure_receiver_config()
+            liquid_mass = self._lpr_liquid_mass_unknown(unknowns, 10)
+            vapor_mass = self._lpr_vapor_mass_unknown(unknowns, 10)
+            penalties.extend(
+                [
+                    max(0.0, float(lpr_cfg.get("liquid_mass_min_kg", 0.0)) - liquid_mass),
+                    max(0.0, liquid_mass - float(lpr_cfg.get("liquid_mass_max_kg", lpr_cfg.get("mass_max_kg", 100.0)))),
+                    max(0.0, float(lpr_cfg.get("vapor_mass_min_kg", 0.0)) - vapor_mass),
+                    max(0.0, vapor_mass - float(lpr_cfg.get("vapor_mass_max_kg", lpr_cfg.get("mass_max_kg", 100.0)))),
+                ]
+            )
+        reg_cells_c = self._cascade_regenerator_cells_c(unknowns)
+        reg_cfg = self._standalone_transient_regenerator_config()
+        if reg_cells_c.size > 0 and reg_cfg is not None:
+            lower_c = float(reg_cfg.get("solid_lower_c", -200.0))
+            upper_c = float(reg_cfg.get("solid_upper_c", 150.0))
+            penalties.extend(max(0.0, lower_c - float(value)) for value in reg_cells_c)
+            penalties.extend(max(0.0, float(value) - upper_c) for value in reg_cells_c)
+        cascade_cells_c = self._cascade_exchanger_cells_c(unknowns)
+        cascade_cfg = self._cascade_exchanger_config()
+        if cascade_cells_c.size > 0 and cascade_cfg is not None:
+            lower_c = float(cascade_cfg.get("solid_lower_c", cascade_cfg.get("matrix_lower_c", -100.0)))
+            upper_c = float(cascade_cfg.get("solid_upper_c", cascade_cfg.get("matrix_upper_c", 150.0)))
+            penalties.extend(max(0.0, lower_c - float(value)) for value in cascade_cells_c)
+            penalties.extend(max(0.0, float(value) - upper_c) for value in cascade_cells_c)
         penalty_sum = sum(penalties)
         if penalty_sum < 1.0e-7:
             return np.zeros(residual_size, dtype=float)
@@ -1102,6 +1516,10 @@ class CascadeSystemModel:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns[:10]
         receiver_mass_kg = self._receiver_unknown_mass(unknowns)
         subcooling_k = self._lpr_subcooling_unknown(unknowns, 10)
+        lpr_liquid_mass_kg = self._lpr_liquid_mass_unknown(unknowns, 10)
+        lpr_vapor_mass_kg = self._lpr_vapor_mass_unknown(unknowns, 10)
+        regenerator_cells_c = self._cascade_regenerator_cells_c(unknowns)
+        cascade_exchanger_cells_c = self._cascade_exchanger_cells_c(unknowns)
         m_ref = self.effective_refrigerant_mass_flow(m_ref_cascade, m_ref_dock)
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
@@ -1128,6 +1546,8 @@ class CascadeSystemModel:
             q_dock_evap,
             receiver_mass_kg,
             subcooling_k,
+            lpr_liquid_mass_kg,
+            lpr_vapor_mass_kg,
         )
         hx_uas = self._heat_exchanger_uas(air)
 
@@ -1145,6 +1565,7 @@ class CascadeSystemModel:
         else:
             cascade_balance = air["q_cascade"] - q_cascade_ua
 
+        ref_mass_balance = ref["lpr_volume_residual_m3"] if self.lpr_inventory_enabled() else m_ref - ref["m_ref_compressor"]
         balances = [
             air["q_room"] - self.load_w(time_s),
             q_dock_evap - self.dock_load_w(time_s),
@@ -1155,10 +1576,20 @@ class CascadeSystemModel:
             ref["q_cond"] - q_cond_ua,
             m_ref_cascade - ref["m_ref_valve_cascade"],
             m_ref_dock - ref["m_ref_valve_dock"],
-            m_ref - ref["m_ref_compressor"],
+            ref_mass_balance,
         ]
         if self.high_pressure_receiver_enabled():
             balances.append(self._receiver_inlet_flow_kg_s(ref["m_ref_compressor"]) - ref["m_ref_valve"])
+        if self.lpr_subcooling_control_enabled():
+            balances.append(subcooling_k - self._lpr_subcooling_target_k())
+        if self.lpr_inventory_enabled():
+            lpr_cfg = self._low_pressure_receiver_config()
+            balances.extend(
+                [
+                    lpr_liquid_mass_kg - float(lpr_cfg.get("initial_liquid_mass_kg", lpr_liquid_mass_kg)),
+                    lpr_vapor_mass_kg - float(lpr_cfg.get("initial_vapor_mass_kg", lpr_vapor_mass_kg)),
+                ]
+            )
 
         metrics = {
             "room_c": room_c,
@@ -1185,6 +1616,13 @@ class CascadeSystemModel:
             "refrigerant_condensing_pressure_from_tcond_pa": ref["p_cond_from_tcond"],
             "refrigerant_pressure_ratio_from_tcond": ref["pressure_ratio_from_tcond"],
             "air_compressor_map_mass_flow_kg_s": air["m_air_map"],
+            "air_compressor_suction_density_kg_m3": air["rho1"],
+            "air_compressor_suction_mixture_density_kg_m3": air["rho1_mixture"],
+            "air_compressor_volumetric_flow_m3_s": air["m_air"] / max(air["rho1"], 1.0e-9),
+            "air_compressor_map_volumetric_flow_cfm": air["map_q_cfm"],
+            "air_compressor_map_speed_eval_rpm": air["map_speed_eval_rpm"],
+            "air_compressor_map_head_eval_ft": air["map_head_eval_ft"],
+            "air_compressor_map_d_q_d_speed_m3_s_per_rpm": air["map_d_q_d_speed_m3_s_per_rpm"],
             "infiltration_room_w": infiltration["room_w"],
             "infiltration_dock_w": infiltration["dock_w"],
             "humidity_ratio_room_kg_kg_da": air["humidity_ratio_room"],
@@ -1255,6 +1693,7 @@ class CascadeSystemModel:
             "receiver_inlet_m_dot_kg_s": ref["receiver_inlet_m_dot_kg_s"],
             "receiver_outlet_m_dot_kg_s": ref["m_ref_valve"],
         }
+        metrics.update(self._lpr_inventory_output_values(ref))
         return np.asarray(balances, dtype=float), metrics
 
     def _pressure_from_isentropic_head(
@@ -1307,8 +1746,27 @@ class CascadeSystemModel:
         flow_model = flow_cfg.get("model", "polynomial_volumetric_flow_head")
         compressor_eta_is = float(air_cfg["compressor_eta_is"])
         map_m_air = 0.0
+        map_q_cfm = 0.0
+        map_speed_eval_rpm = float(flow_cfg.get("speed_rpm", 0.0))
+        map_head_eval_ft = 0.0
+        map_d_q_d_speed_m3_s_per_rpm = 0.0
         compressor_head_actual: float | None = None
-        if flow_model == "polynomial_volumetric_flow_head_speed_damper":
+        if air_performance_map_model(flow_model):
+            p2 = p1 * float(flow_cfg.get("pressure_ratio", air_cfg["pressure_ratio"]))
+            state2s = state_at_entropy(p2, x_room, state1.entropy_j_kg_da_k)
+            h2s = state2s.enthalpy_j_kg_da
+            compressor_head_is = h2s - h1
+            compressor_map = air_compressor_performance_map(flow_cfg, compressor_head_is)
+            compressor_eta_is = compressor_map["eta_is"]
+            volumetric_flow_m3_s = compressor_map["volumetric_flow_m3_s"]
+            m_air = volumetric_flow_m3_s * rho1
+            map_m_air = m_air
+            map_q_cfm = compressor_map["volumetric_flow_cfm"]
+            map_speed_eval_rpm = compressor_map["speed_eval_rpm"]
+            map_head_eval_ft = compressor_map["head_is_eval_ft"]
+            map_d_q_d_speed_m3_s_per_rpm = compressor_map["d_q_d_speed_m3_s_per_rpm"]
+            compressor_head_actual = compressor_head_is / max(compressor_eta_is, 1.0e-6)
+        elif flow_model == "polynomial_volumetric_flow_head_speed_damper":
             head_m, volumetric_flow_m3_s = self._air_damper_operating_point(flow_cfg)
             m_air = volumetric_flow_m3_s * rho1
             map_m_air = m_air
@@ -1415,6 +1873,10 @@ class CascadeSystemModel:
             "t5_k": t5_k,
             "m_air": m_air,
             "m_air_map": map_m_air,
+            "map_q_cfm": map_q_cfm,
+            "map_speed_eval_rpm": map_speed_eval_rpm,
+            "map_head_eval_ft": map_head_eval_ft,
+            "map_d_q_d_speed_m3_s_per_rpm": map_d_q_d_speed_m3_s_per_rpm,
             "damper_opening": float(flow_cfg.get("damper_opening", 1.0)),
             "damper_resistance_head_coefficient": float(flow_cfg.get("damper_resistance_head_coefficient", 0.0)),
             "rho1": rho1,
@@ -1530,6 +1992,8 @@ class CascadeSystemModel:
         q_dock: float,
         receiver_mass_kg: float | None = None,
         subcooling_override_k: float | None = None,
+        lpr_liquid_mass_kg: float | None = None,
+        lpr_vapor_mass_kg: float | None = None,
     ) -> dict[str, float]:
         vcc_cfg = self.cfg["vcc_cycle"]
         p_evap = p_sat(tevap_k, self.ref_fluid)
@@ -1586,11 +2050,7 @@ class CascadeSystemModel:
             w_ref_comp = compressor_map["P_W"]
             m_ref_compressor = compressor_map["mdot_kg_s"]
             uses_map_capacity_balance = compressor_uses_map_cooling_capacity_balance(compressor_cfg)
-        elif compressor_model in {
-            "screw_pressure_ratio_polynomial",
-            "screw_polynomial",
-            "pressure_ratio_polynomial_screw",
-        }:
+        elif compressor_model in SCREW_PRESSURE_RATIO_COMPRESSOR_MODELS:
             uses_map_capacity_balance = False
         elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
             uses_map_capacity_balance = False
@@ -1613,7 +2073,22 @@ class CascadeSystemModel:
             h_dock_out = h10 + q_dock_branch / max(m_ref_dock, 1.0e-9)
             h7_evaporator_out = (m_ref_cascade * h_cascade_out + m_ref_dock * h_dock_out) / max(m_ref, 1.0e-9)
         t7_evaporator_out_k = props_si("T", "P", p_evap, "H", h7_evaporator_out, self.ref_fluid)
-        if self._compressor_uses_saturated_suction():
+        lpr_inventory = self._evaluate_low_pressure_receiver_inventory(
+            0.0 if lpr_liquid_mass_kg is None else float(lpr_liquid_mass_kg),
+            0.0 if lpr_vapor_mass_kg is None else float(lpr_vapor_mass_kg),
+            p_evap,
+            h7_evaporator_out,
+            t7_evaporator_out_k,
+            m_ref,
+        )
+        if lpr_inventory["enabled"] and not self._compressor_uses_saturated_suction():
+            h7 = lpr_inventory["suction_enthalpy_j_kg"]
+            t7_k = lpr_inventory["suction_temperature_k"]
+            if h7 <= lpr_inventory["h_vapor_j_kg"] + 1.0e-6:
+                s7 = props_si("S", "P", p_evap, "Q", 1.0, self.ref_fluid)
+            else:
+                s7 = props_si("S", "P", p_evap, "H", h7, self.ref_fluid)
+        elif self._compressor_uses_saturated_suction():
             h7 = props_si("H", "P", p_evap, "Q", 1.0, self.ref_fluid)
             t7_k = props_si("T", "P", p_evap, "Q", 1.0, self.ref_fluid)
             s7 = props_si("S", "P", p_evap, "Q", 1.0, self.ref_fluid)
@@ -1661,11 +2136,25 @@ class CascadeSystemModel:
                     pressure_ratio_min=float(compressor_cfg.get("pressure_ratio_min", 1.000001)),
                     pressure_ratio_max=compressor_cfg.get("pressure_ratio_max"),
                 )
-        elif compressor_model in {
-            "screw_pressure_ratio_polynomial",
-            "screw_polynomial",
-            "pressure_ratio_polynomial_screw",
-        }:
+        elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
+            pressure_ratio = p_cond / max(p_evap, 1.0e-9)
+            compressor_suction_density = props_si("D", "P", p_evap, "H", h7, self.ref_fluid)
+            compressor_eta_v = compressor_volumetric_efficiency_clearance(
+                pressure_ratio,
+                float(compressor_cfg.get("clearance_factor", 0.05)),
+                float(compressor_cfg.get("polytropic_exponent", 1.25)),
+                float(compressor_cfg.get("eta_v_min", 0.3)),
+                float(compressor_cfg.get("eta_v_max", 1.0)),
+            )
+            m_ref_compressor = compressor_mass_flow_positive_displacement(
+                compressor_suction_density,
+                compressor_speed_rpm,
+                compressor_displacement,
+                compressor_eta_v,
+            )
+            h8s_for_work = props_si("H", "P", p_cond, "S", s7, self.ref_fluid)
+            w_ref_comp = m_ref_compressor * (h8s_for_work - h7) / max(compressor_eta_is, 1.0e-6)
+        elif compressor_model in SCREW_PRESSURE_RATIO_COMPRESSOR_MODELS:
             pressure_ratio = p_cond / max(p_evap, 1.0e-9)
             screw_map = screw_compressor_pressure_ratio_map(compressor_cfg, pressure_ratio)
             compressor_eta_is = screw_map["eta_is"]
@@ -1677,24 +2166,6 @@ class CascadeSystemModel:
                 if swept_volume_m3_h is not None and nominal_speed_rpm is not None:
                     compressor_displacement = float(swept_volume_m3_h) / max(float(nominal_speed_rpm) * 60.0, 1.0e-12)
             compressor_suction_density = props_si("D", "P", p_evap, "H", h7, self.ref_fluid)
-            m_ref_compressor = compressor_mass_flow_positive_displacement(
-                compressor_suction_density,
-                compressor_speed_rpm,
-                compressor_displacement,
-                compressor_eta_v,
-            )
-            h8s_for_work = props_si("H", "P", p_cond, "S", s7, self.ref_fluid)
-            w_ref_comp = m_ref_compressor * (h8s_for_work - h7) / max(compressor_eta_is, 1.0e-6)
-        elif compressor_model in {"positive_displacement_clearance", "positive_displacement"}:
-            pressure_ratio = p_cond / max(p_evap, 1.0e-9)
-            compressor_suction_density = props_si("D", "P", p_evap, "H", h7, self.ref_fluid)
-            compressor_eta_v = compressor_volumetric_efficiency_clearance(
-                pressure_ratio,
-                float(compressor_cfg.get("clearance_factor", 0.05)),
-                float(compressor_cfg.get("polytropic_exponent", 1.25)),
-                float(compressor_cfg.get("eta_v_min", 0.3)),
-                float(compressor_cfg.get("eta_v_max", 1.0)),
-            )
             m_ref_compressor = compressor_mass_flow_positive_displacement(
                 compressor_suction_density,
                 compressor_speed_rpm,
@@ -1757,6 +2228,31 @@ class CascadeSystemModel:
             "receiver_outlet_enthalpy_j_kg": receiver["outlet_enthalpy_j_kg"],
             "receiver_outlet_density_kg_m3": receiver["outlet_density_kg_m3"],
             "receiver_inlet_m_dot_kg_s": self._receiver_inlet_flow_kg_s(m_ref_compressor),
+            "low_pressure_receiver_inventory": lpr_inventory,
+            "lpr_inventory_enabled": lpr_inventory["enabled"],
+            "lpr_volume_m3": lpr_inventory["volume_m3"],
+            "lpr_liquid_mass_kg": lpr_inventory["liquid_mass_kg"],
+            "lpr_vapor_mass_kg": lpr_inventory["vapor_mass_kg"],
+            "lpr_liquid_volume_m3": lpr_inventory["liquid_volume_m3"],
+            "lpr_vapor_volume_m3": lpr_inventory["vapor_volume_m3"],
+            "lpr_liquid_fill_fraction": lpr_inventory["fill_fraction"],
+            "lpr_liquid_fill_fraction_raw": lpr_inventory["fill_fraction_raw"],
+            "lpr_overfill_mass_kg": lpr_inventory["overfill_mass_kg"],
+            "lpr_volume_residual_m3": lpr_inventory["volume_residual_m3"],
+            "lpr_evaporator_outlet_quality": lpr_inventory["evaporator_outlet_quality"],
+            "lpr_evaporator_outlet_quality_raw": lpr_inventory["evaporator_outlet_quality_raw"],
+            "lpr_return_superheat_k": lpr_inventory["return_superheat_k"],
+            "lpr_vapor_return_m_dot_kg_s": lpr_inventory["vapor_return_m_dot_kg_s"],
+            "lpr_liquid_return_m_dot_kg_s": lpr_inventory["liquid_return_m_dot_kg_s"],
+            "lpr_boil_off_m_dot_kg_s": lpr_inventory["boil_off_m_dot_kg_s"],
+            "lpr_boil_off_heat_w": lpr_inventory["boil_off_heat_w"],
+            "lpr_liquid_carryover_m_dot_kg_s": lpr_inventory["liquid_carryover_m_dot_kg_s"],
+            "lpr_suction_enthalpy_j_kg": lpr_inventory["suction_enthalpy_j_kg"],
+            "lpr_suction_temperature_k": lpr_inventory["suction_temperature_k"],
+            "lpr_suction_superheat_k": lpr_inventory["suction_superheat_k"],
+            "lpr_suction_vapor_quality": lpr_inventory["suction_vapor_quality"],
+            "lpr_h_fg_j_kg": lpr_inventory["h_fg_j_kg"],
+            "lpr_cp_vapor_j_kg_k": lpr_inventory["cp_vapor_j_kg_k"],
             "h7": h7,
             "h7_evaporator_out": h7_evaporator_out,
             "t7_k": t7_k,
@@ -1935,9 +2431,44 @@ class CascadeSystemModel:
             return None
 
         model = str(reg_cfg.get("model", "")).strip().lower()
-        if model not in {"transient_distributed", "transient_lumped", "distributed_transient", "yang_transient"}:
+        if model not in TRANSIENT_REGENERATOR_MODELS:
             return None
         return reg_cfg
+
+    def _standalone_regenerator_uses_lumped_matrix(self, reg_cfg: dict | None = None) -> bool:
+        if reg_cfg is None:
+            reg_cfg = self._standalone_transient_regenerator_config()
+        if reg_cfg is None:
+            return False
+        return str(reg_cfg.get("model", "")).strip().lower() in LUMPED_MATRIX_REGENERATOR_MODELS
+
+    def _standalone_regenerator_uses_two_lump_matrix(self, reg_cfg: dict | None = None) -> bool:
+        if reg_cfg is None:
+            reg_cfg = self._standalone_transient_regenerator_config()
+        if reg_cfg is None:
+            return False
+        return str(reg_cfg.get("model", "")).strip().lower() in TWO_LUMP_MATRIX_REGENERATOR_MODELS
+
+    def _standalone_regenerator_capacitances_j_k(self, reg_cfg: dict, state_count: int) -> np.ndarray:
+        profile = reg_cfg.get("solid_capacitance_profile_j_k", reg_cfg.get("matrix_capacitance_profile_j_k"))
+        if isinstance(profile, list) and profile:
+            values = np.asarray([max(float(value), 1.0e-9) for value in profile], dtype=float)
+            if values.size >= state_count:
+                return values[:state_count]
+            return np.concatenate([values, np.full(state_count - values.size, values[-1], dtype=float)])
+
+        if self._standalone_regenerator_uses_two_lump_matrix(reg_cfg):
+            hot_cap = reg_cfg.get("hot_solid_capacitance_j_k", reg_cfg.get("hot_matrix_capacitance_j_k"))
+            cold_cap = reg_cfg.get("cold_solid_capacitance_j_k", reg_cfg.get("cold_matrix_capacitance_j_k"))
+            if hot_cap is not None and cold_cap is not None:
+                values = np.array([max(float(hot_cap), 1.0e-9), max(float(cold_cap), 1.0e-9)], dtype=float)
+                if state_count <= 2:
+                    return values[:state_count]
+                extra = max((float(reg_cfg.get("solid_capacitance_j_k", np.sum(values))) - float(np.sum(values))) / (state_count - 2), 1.0e-9)
+                return np.concatenate([values, np.full(state_count - 2, extra, dtype=float)])
+
+        total_cap = max(float(reg_cfg.get("solid_capacitance_j_k", 1.0)), 1.0e-9)
+        return np.full(state_count, total_cap / max(state_count, 1), dtype=float)
 
     def _standalone_transient_regenerator_result(
         self,
@@ -1988,15 +2519,63 @@ class CascadeSystemModel:
         heat_leak_ua_total_w_k = max(float(reg_cfg.get("heat_leak_ua_w_k", 0.0)), 0.0)
         q_leak_to_solid_w = heat_leak_ua_total_w_k * (ambient_k - solid_k) / max(cell_count, 1)
         solid_net_w = q_hot_to_solid_w - q_solid_to_cold_w + q_leak_to_solid_w
+        result_gas_effectiveness = gas_effectiveness
+
+        if reg_cfg.get("steady_effectiveness_correction", False):
+            target_effectiveness = float(reg_cfg.get("steady_effectiveness_target", reg_cfg.get("overall_effectiveness", 0.9)))
+            target_effectiveness = float(
+                np.clip(
+                    target_effectiveness,
+                    float(reg_cfg.get("steady_effectiveness_min", 0.0)),
+                    float(reg_cfg.get("steady_effectiveness_max", 0.999999)),
+                )
+            )
+            span_k = float(t3_k) - float(room_k)
+            if abs(span_k) > 1.0e-9:
+                corrected_t4_k = float(t3_k) - target_effectiveness * span_k
+                corrected_t6_k = float(room_k) + target_effectiveness * span_k
+                equilibrium_solid_k = np.linspace(
+                    0.5 * (float(t3_k) + corrected_t6_k),
+                    0.5 * (corrected_t4_k + float(room_k)),
+                    cell_count,
+                )
+                relaxation_s = max(
+                    float(
+                        reg_cfg.get(
+                            "steady_profile_relaxation_time_s",
+                            reg_cfg.get("solid_equilibration_time_constant_s", reg_cfg.get("auto_capacitance_time_constant_s", 4.5)),
+                        )
+                    ),
+                    1.0e-9,
+                )
+                capacitances_j_k = self._standalone_regenerator_capacitances_j_k(reg_cfg, cell_count)
+                profile_net_w = capacitances_j_k * (equilibrium_solid_k - solid_k) / relaxation_s
+                solid_net_w = profile_net_w + q_leak_to_solid_w
+
+                storage_total_w = float(np.sum(solid_net_w))
+                q_transfer_w = capacity_rate_w_k * (float(t3_k) - corrected_t4_k)
+                q_hot_total_w = max(q_transfer_w + 0.5 * storage_total_w, 0.0)
+                q_cold_total_w = max(q_transfer_w - 0.5 * storage_total_w, 0.0)
+                q_hot_to_solid_w = np.full(cell_count, q_hot_total_w / max(cell_count, 1), dtype=float)
+                q_solid_to_cold_w = np.full(cell_count, q_cold_total_w / max(cell_count, 1), dtype=float)
+                hot_out_k = np.linspace(float(t3_k), corrected_t4_k, cell_count + 1, dtype=float)[1:]
+                cold_out_k = np.linspace(corrected_t6_k, float(room_k), cell_count + 1, dtype=float)[:-1]
+                hot_in_k = corrected_t4_k
+                cold_in_k = corrected_t6_k
+                result_gas_effectiveness = target_effectiveness
 
         return {
             "t4_k": float(hot_in_k),
             "t6_k": float(cold_in_k),
+            "regenerator_model": "distributed_matrix_effectiveness_corrected"
+            if reg_cfg.get("steady_effectiveness_correction", False)
+            else "distributed_matrix",
             "q_reg_hot_w": float(np.sum(q_hot_to_solid_w)),
             "q_reg_cold_w": float(np.sum(q_solid_to_cold_w)),
             "q_reg_solid_net_w": solid_net_w,
             "q_reg_heat_leak_w": float(np.sum(q_leak_to_solid_w)),
-            "regenerator_gas_effectiveness": gas_effectiveness,
+            "regenerator_gas_effectiveness": result_gas_effectiveness,
+            "regenerator_raw_gas_effectiveness": gas_effectiveness,
             "regenerator_solid_mean_k": float(np.mean(solid_k)),
             "regenerator_solid_min_k": float(np.min(solid_k)),
             "regenerator_solid_max_k": float(np.max(solid_k)),
@@ -2005,6 +2584,153 @@ class CascadeSystemModel:
             "regenerator_hot_out_k": hot_out_k,
             "regenerator_cold_out_k": cold_out_k,
         }
+
+    def _standalone_lumped_matrix_regenerator_result(
+        self,
+        room_k: float,
+        t3_k: float,
+        matrix_c: np.ndarray,
+        m_air_kg_s: float,
+    ) -> dict[str, float | np.ndarray | str]:
+        reg_cfg = self._standalone_transient_regenerator_config()
+        if reg_cfg is None:
+            raise ValueError("Lumped matrix regenerator configuration is not enabled.")
+
+        matrix_c = np.asarray(matrix_c, dtype=float)
+        if matrix_c.size <= 0:
+            raise ValueError("Lumped matrix regenerator requires a matrix temperature state.")
+        matrix_k = float(matrix_c[0] + KELVIN_OFFSET)
+
+        air_cfg = self.cfg["air_cycle"]
+        ua_total_w_k = max(float(reg_cfg.get("ua_w_k", air_cfg["regenerator_ua_w_k"])), 0.0)
+        gas_solid_ua_factor = max(float(reg_cfg.get("gas_solid_ua_factor", 2.0)), 0.0)
+        ua_side_default = gas_solid_ua_factor * ua_total_w_k
+        ua_hot_w_k = max(float(reg_cfg.get("ua_hot_w_k", reg_cfg.get("hot_side_ua_w_k", ua_side_default))), 0.0)
+        ua_cold_w_k = max(float(reg_cfg.get("ua_cold_w_k", reg_cfg.get("cold_side_ua_w_k", ua_side_default))), 0.0)
+
+        cp_air = max(float(reg_cfg.get("cp_air_j_kg_k", CP_DOCK_AIR)), 1.0e-9)
+        cp_hot = max(float(reg_cfg.get("cp_hot_air_j_kg_k", cp_air)), 1.0e-9)
+        cp_cold = max(float(reg_cfg.get("cp_cold_air_j_kg_k", cp_air)), 1.0e-9)
+        m_hot = max(float(reg_cfg.get("hot_m_dot_factor", 1.0)) * float(m_air_kg_s), 0.0)
+        m_cold = max(float(reg_cfg.get("cold_m_dot_factor", 1.0)) * float(m_air_kg_s), 0.0)
+        c_hot_w_k = max(m_hot * cp_hot, 1.0e-9)
+        c_cold_w_k = max(m_cold * cp_cold, 1.0e-9)
+
+        hot_effectiveness = 1.0 - float(np.exp(-ua_hot_w_k / c_hot_w_k))
+        cold_effectiveness = 1.0 - float(np.exp(-ua_cold_w_k / c_cold_w_k))
+        hot_effectiveness = float(np.clip(hot_effectiveness, 0.0, 1.0))
+        cold_effectiveness = float(np.clip(cold_effectiveness, 0.0, 1.0))
+
+        t4_k = matrix_k + (float(t3_k) - matrix_k) * (1.0 - hot_effectiveness)
+        t6_k = matrix_k + (float(room_k) - matrix_k) * (1.0 - cold_effectiveness)
+        q_hot_to_matrix_w = c_hot_w_k * (float(t3_k) - t4_k)
+        q_matrix_to_cold_w = c_cold_w_k * (t6_k - float(room_k))
+
+        ambient_k = float(reg_cfg.get("ambient_k", self.cfg.get("boundary_conditions", {}).get("ambient_c", 30.0) + KELVIN_OFFSET))
+        heat_leak_ua_w_k = max(float(reg_cfg.get("heat_leak_ua_w_k", 0.0)), 0.0)
+        q_leak_to_matrix_w = heat_leak_ua_w_k * (ambient_k - matrix_k)
+        matrix_net_w = q_hot_to_matrix_w - q_matrix_to_cold_w + q_leak_to_matrix_w
+
+        return {
+            "t4_k": float(t4_k),
+            "t6_k": float(t6_k),
+            "regenerator_model": "lumped_matrix",
+            "q_reg_hot_w": float(q_hot_to_matrix_w),
+            "q_reg_cold_w": float(q_matrix_to_cold_w),
+            "q_reg_solid_net_w": np.array([matrix_net_w], dtype=float),
+            "q_reg_heat_leak_w": float(q_leak_to_matrix_w),
+            "regenerator_gas_effectiveness": 0.5 * (hot_effectiveness + cold_effectiveness),
+            "regenerator_hot_effectiveness": hot_effectiveness,
+            "regenerator_cold_effectiveness": cold_effectiveness,
+            "regenerator_solid_mean_k": matrix_k,
+            "regenerator_solid_min_k": matrix_k,
+            "regenerator_solid_max_k": matrix_k,
+            "regenerator_matrix_k": matrix_k,
+            "regenerator_cell_count": 1.0,
+            "regenerator_solid_k": np.array([matrix_k], dtype=float),
+            "regenerator_hot_out_k": np.array([t4_k], dtype=float),
+            "regenerator_cold_out_k": np.array([t6_k], dtype=float),
+        }
+
+    def _standalone_two_lump_matrix_regenerator_result(
+        self,
+        room_k: float,
+        t3_k: float,
+        matrix_c: np.ndarray,
+        m_air_kg_s: float,
+    ) -> dict[str, float | np.ndarray | str]:
+        reg_cfg = self._standalone_transient_regenerator_config()
+        if reg_cfg is None:
+            raise ValueError("Two-lump matrix regenerator configuration is not enabled.")
+
+        matrix_c = np.asarray(matrix_c, dtype=float)
+        if matrix_c.size < 2:
+            raise ValueError("Two-lump matrix regenerator requires hot and cold matrix temperature states.")
+        hot_matrix_k = float(matrix_c[0] + KELVIN_OFFSET)
+        cold_matrix_k = float(matrix_c[1] + KELVIN_OFFSET)
+
+        air_cfg = self.cfg["air_cycle"]
+        ua_w_k = max(float(reg_cfg.get("ua_between_w_k", reg_cfg.get("ua_w_k", air_cfg["regenerator_ua_w_k"]))), 0.0)
+        cp_air = max(float(reg_cfg.get("cp_air_j_kg_k", CP_DOCK_AIR)), 1.0e-9)
+        cp_hot = max(float(reg_cfg.get("cp_hot_air_j_kg_k", cp_air)), 1.0e-9)
+        cp_cold = max(float(reg_cfg.get("cp_cold_air_j_kg_k", cp_air)), 1.0e-9)
+        m_hot = max(float(reg_cfg.get("hot_m_dot_factor", 1.0)) * float(m_air_kg_s), 0.0)
+        m_cold = max(float(reg_cfg.get("cold_m_dot_factor", 1.0)) * float(m_air_kg_s), 0.0)
+        c_hot_w_k = max(m_hot * cp_hot, 1.0e-9)
+        c_cold_w_k = max(m_cold * cp_cold, 1.0e-9)
+
+        q_hot_adv_w = c_hot_w_k * (float(t3_k) - hot_matrix_k)
+        q_cold_adv_w = c_cold_w_k * (float(room_k) - cold_matrix_k)
+        q_hot_to_cold_w = ua_w_k * (hot_matrix_k - cold_matrix_k)
+
+        ambient_k = float(reg_cfg.get("ambient_k", self.cfg.get("boundary_conditions", {}).get("ambient_c", 30.0) + KELVIN_OFFSET))
+        heat_leak_ua_total_w_k = max(float(reg_cfg.get("heat_leak_ua_w_k", 0.0)), 0.0)
+        q_leak_hot_w = 0.5 * heat_leak_ua_total_w_k * (ambient_k - hot_matrix_k)
+        q_leak_cold_w = 0.5 * heat_leak_ua_total_w_k * (ambient_k - cold_matrix_k)
+
+        hot_net_w = q_hot_adv_w - q_hot_to_cold_w + q_leak_hot_w
+        cold_net_w = q_cold_adv_w + q_hot_to_cold_w + q_leak_cold_w
+        matrix_k = np.array([hot_matrix_k, cold_matrix_k], dtype=float)
+
+        return {
+            "t4_k": hot_matrix_k,
+            "t6_k": cold_matrix_k,
+            "regenerator_model": "two_lump_matrix",
+            "q_reg_hot_w": float(q_hot_adv_w),
+            "q_reg_cold_w": float(c_cold_w_k * (cold_matrix_k - float(room_k))),
+            "q_reg_solid_net_w": np.array([hot_net_w, cold_net_w], dtype=float),
+            "q_reg_heat_leak_w": float(q_leak_hot_w + q_leak_cold_w),
+            "regenerator_gas_effectiveness": float(
+                np.clip((float(t3_k) - hot_matrix_k) / max(float(t3_k) - float(room_k), 1.0e-9), 0.0, 1.0)
+            ),
+            "regenerator_solid_mean_k": float(np.mean(matrix_k)),
+            "regenerator_solid_min_k": float(np.min(matrix_k)),
+            "regenerator_solid_max_k": float(np.max(matrix_k)),
+            "regenerator_matrix_k": float(np.mean(matrix_k)),
+            "regenerator_hot_matrix_k": hot_matrix_k,
+            "regenerator_cold_matrix_k": cold_matrix_k,
+            "regenerator_cell_count": 2.0,
+            "regenerator_solid_k": matrix_k,
+            "regenerator_hot_out_k": np.array([hot_matrix_k], dtype=float),
+            "regenerator_cold_out_k": np.array([cold_matrix_k], dtype=float),
+            "regenerator_q_hot_advective_w": float(q_hot_adv_w),
+            "regenerator_q_cold_advective_w": float(q_cold_adv_w),
+            "regenerator_q_hot_to_cold_w": float(q_hot_to_cold_w),
+        }
+
+    def _standalone_dynamic_regenerator_result(
+        self,
+        room_k: float,
+        t3_k: float,
+        solid_c: np.ndarray,
+        m_air_kg_s: float,
+    ) -> dict[str, float | np.ndarray | str]:
+        reg_cfg = self._standalone_transient_regenerator_config()
+        if self._standalone_regenerator_uses_two_lump_matrix(reg_cfg):
+            return self._standalone_two_lump_matrix_regenerator_result(room_k, t3_k, solid_c, m_air_kg_s)
+        if self._standalone_regenerator_uses_lumped_matrix(reg_cfg):
+            return self._standalone_lumped_matrix_regenerator_result(room_k, t3_k, solid_c, m_air_kg_s)
+        return self._standalone_transient_regenerator_result(room_k, t3_k, solid_c, m_air_kg_s)
 
     def air_cycle_residual(self, unknowns: np.ndarray, prev_state: np.ndarray, time_s: float, dt_s: float) -> np.ndarray:
         unknowns = np.asarray(unknowns, dtype=float)
@@ -2033,7 +2759,7 @@ class CascadeSystemModel:
                 solid_c = unknowns[5:]
                 if solid_c.size <= 0:
                     raise ValueError("Transient regenerator state is missing solid cell temperatures.")
-                transient_reg = self._standalone_transient_regenerator_result(room_k, t3_k, solid_c, air["m_air"])
+                transient_reg = self._standalone_dynamic_regenerator_result(room_k, t3_k, solid_c, air["m_air"])
         except ValueError:
             return np.full(unknowns.size, 1.0e9, dtype=float)
 
@@ -2050,9 +2776,12 @@ class CascadeSystemModel:
             prev_solid_c = np.asarray(prev_state[3:], dtype=float)
             if prev_solid_c.size != solid_c.size:
                 prev_solid_c = solid_c.copy()
-            solid_cap_total = max(float(reg_cfg.get("solid_capacitance_j_k", 1.0)), 1.0e-9)
-            solid_cap_cell = solid_cap_total / max(solid_c.size, 1)
-            solid_residuals = solid_c - prev_solid_c - dt_s * np.asarray(transient_reg["q_reg_solid_net_w"], dtype=float) / solid_cap_cell
+            solid_capacitances = self._standalone_regenerator_capacitances_j_k(reg_cfg, solid_c.size)
+            solid_residuals = (
+                solid_c
+                - prev_solid_c
+                - dt_s * np.asarray(transient_reg["q_reg_solid_net_w"], dtype=float) / solid_capacitances
+            )
 
             common_residuals = [
                 room_c - prev_room_c - dt_s * (room_load_w - air["q_room"]) / caps["room_capacitance_j_k"],
@@ -2128,7 +2857,7 @@ class CascadeSystemModel:
         reg_cfg = self._standalone_transient_regenerator_config()
         transient_reg = None
         if reg_cfg is not None and unknowns.size > 5:
-            transient_reg = self._standalone_transient_regenerator_result(room_k, t3_k, unknowns[5:], air["m_air"])
+            transient_reg = self._standalone_dynamic_regenerator_result(room_k, t3_k, unknowns[5:], air["m_air"])
 
         refrigerating_source = str(air_cfg.get("refrigerating_temperature_source", "room")).strip().lower()
         if refrigerating_source in {"supply", "t5", "air_entering_room"}:
@@ -2187,6 +2916,10 @@ class CascadeSystemModel:
             "air_compressor_suction_density_kg_m3": air["rho1"],
             "air_compressor_suction_mixture_density_kg_m3": air["rho1_mixture"],
             "air_compressor_volumetric_flow_m3_s": air["m_air"] / max(air["rho1"], 1.0e-9),
+            "air_compressor_map_volumetric_flow_cfm": air["map_q_cfm"],
+            "air_compressor_map_speed_eval_rpm": air["map_speed_eval_rpm"],
+            "air_compressor_map_head_eval_ft": air["map_head_eval_ft"],
+            "air_compressor_map_d_q_d_speed_m3_s_per_rpm": air["map_d_q_d_speed_m3_s_per_rpm"],
             "air_compressor_actual_head_j_kg": air["compressor_head_actual"],
             "air_compressor_actual_head_m": air["compressor_head_actual"] / 9.80665,
             "air_compressor_isentropic_head_j_kg": air["compressor_head_is"],
@@ -2233,22 +2966,48 @@ class CascadeSystemModel:
             "load_w": room_load_w,
         }
         if transient_reg is not None:
+            reg_cfg = self._standalone_transient_regenerator_config()
+            regenerator_cells_c = np.asarray(unknowns[5:], dtype=float)
+            reg_capacitances = self._standalone_regenerator_capacitances_j_k(reg_cfg, regenerator_cells_c.size)
             values.update(
                 {
                     "regenerator_model_transient": 1.0,
+                    "regenerator_model_lumped_matrix": 1.0
+                    if str(transient_reg.get("regenerator_model", "")).strip().lower() == "lumped_matrix"
+                    else 0.0,
+                    "regenerator_model_two_lump_matrix": 1.0
+                    if str(transient_reg.get("regenerator_model", "")).strip().lower() == "two_lump_matrix"
+                    else 0.0,
                     "regenerator_cell_count": transient_reg["regenerator_cell_count"],
                     "regenerator_gas_effectiveness": transient_reg["regenerator_gas_effectiveness"],
+                    "regenerator_solid_capacitance_j_k": float(np.sum(reg_capacitances)),
+                    "regenerator_solid_capacitance_per_cell_j_k": float(np.mean(reg_capacitances)),
                     "regenerator_solid_mean_k": transient_reg["regenerator_solid_mean_k"],
+                    "regenerator_matrix_k": transient_reg["regenerator_solid_mean_k"],
+                    "regenerator_matrix_c": float(transient_reg["regenerator_solid_mean_k"]) - KELVIN_OFFSET,
+                    "regenerator_hot_matrix_k": transient_reg.get("regenerator_hot_matrix_k", transient_reg["regenerator_solid_max_k"]),
+                    "regenerator_hot_matrix_c": float(
+                        transient_reg.get("regenerator_hot_matrix_k", transient_reg["regenerator_solid_max_k"])
+                    )
+                    - KELVIN_OFFSET,
+                    "regenerator_cold_matrix_k": transient_reg.get("regenerator_cold_matrix_k", transient_reg["regenerator_solid_min_k"]),
+                    "regenerator_cold_matrix_c": float(
+                        transient_reg.get("regenerator_cold_matrix_k", transient_reg["regenerator_solid_min_k"])
+                    )
+                    - KELVIN_OFFSET,
                     "regenerator_solid_min_k": transient_reg["regenerator_solid_min_k"],
                     "regenerator_solid_max_k": transient_reg["regenerator_solid_max_k"],
                     "regenerator_q_hot_to_solid_w": transient_reg["q_reg_hot_w"],
                     "regenerator_q_solid_to_cold_w": transient_reg["q_reg_cold_w"],
                     "regenerator_q_solid_net_total_w": float(np.sum(np.asarray(transient_reg["q_reg_solid_net_w"], dtype=float))),
                     "regenerator_q_heat_leak_w": transient_reg["q_reg_heat_leak_w"],
+                    "regenerator_q_hot_to_cold_w": transient_reg.get("regenerator_q_hot_to_cold_w", float("nan")),
                 }
             )
         else:
             values["regenerator_model_transient"] = 0.0
+            values["regenerator_model_lumped_matrix"] = 0.0
+            values["regenerator_model_two_lump_matrix"] = 0.0
 
         state_values = [room_c, water_loop_c, self._room_moisture.humidity_ratio]
         if reg_cfg is not None and unknowns.size > 5:
@@ -2291,6 +3050,18 @@ class CascadeSystemModel:
                     max(0.0, subcooling_k - float(lpr_cfg.get("subcooling_max_k", 30.0))),
                 ]
             )
+        if self.lpr_inventory_enabled():
+            lpr_cfg = self._low_pressure_receiver_config()
+            liquid_mass = self._lpr_liquid_mass_unknown(unknowns, 5)
+            vapor_mass = self._lpr_vapor_mass_unknown(unknowns, 5)
+            penalties.extend(
+                [
+                    max(0.0, float(lpr_cfg.get("liquid_mass_min_kg", 0.0)) - liquid_mass),
+                    max(0.0, liquid_mass - float(lpr_cfg.get("liquid_mass_max_kg", lpr_cfg.get("mass_max_kg", 100.0)))),
+                    max(0.0, float(lpr_cfg.get("vapor_mass_min_kg", 0.0)) - vapor_mass),
+                    max(0.0, vapor_mass - float(lpr_cfg.get("vapor_mass_max_kg", lpr_cfg.get("mass_max_kg", 100.0)))),
+                ]
+            )
         penalty_sum = sum(penalties)
         if penalty_sum < 1.0e-7:
             return np.zeros(residual_size, dtype=float)
@@ -2300,9 +3071,16 @@ class CascadeSystemModel:
         sink_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock = unknowns[:5]
         receiver_mass_kg = self._vcc_receiver_unknown_mass(unknowns)
         subcooling_k = self._lpr_subcooling_unknown(unknowns, 5)
+        lpr_liquid_mass_kg = self._lpr_liquid_mass_unknown(unknowns, 5)
+        lpr_vapor_mass_kg = self._lpr_vapor_mass_unknown(unknowns, 5)
         m_ref = self.effective_refrigerant_mass_flow(m_ref_cascade, m_ref_dock)
         prev_sink_c = prev_state[0]
         prev_receiver_mass_kg = prev_state[1] if self.high_pressure_receiver_enabled() and len(prev_state) > 1 else receiver_mass_kg
+        prev_lpr_idx = 1 + (1 if self.high_pressure_receiver_enabled() else 0) + (1 if self.lpr_subcooling_control_enabled() else 0)
+        prev_lpr_liquid_mass_kg = prev_state[prev_lpr_idx] if self.lpr_inventory_enabled() and len(prev_state) > prev_lpr_idx else lpr_liquid_mass_kg
+        prev_lpr_vapor_mass_kg = (
+            prev_state[prev_lpr_idx + 1] if self.lpr_inventory_enabled() and len(prev_state) > prev_lpr_idx + 1 else lpr_vapor_mass_kg
+        )
         sink_k = sink_c + KELVIN_OFFSET
         tevap_k = tevap_c + KELVIN_OFFSET
         tcond_k = tcond_c + KELVIN_OFFSET
@@ -2325,6 +3103,8 @@ class CascadeSystemModel:
                 loads["dock_w"],
                 receiver_mass_kg,
                 subcooling_k,
+                lpr_liquid_mass_kg,
+                lpr_vapor_mass_kg,
             )
             condenser_ua = self._vcc_condenser_ua_result()
         except ValueError:
@@ -2336,12 +3116,13 @@ class CascadeSystemModel:
         condenser_lmtd = positive_lmtd(tcond_c - ambient_c, tcond_c - sink_c)
         q_cond_ua = condenser_ua["ua_w_k"] * condenser_lmtd
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
+        ref_mass_balance = ref["lpr_volume_residual_m3"] if self.lpr_inventory_enabled() else m_ref - ref["m_ref_compressor"]
         residuals = [
             sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
             ref["q_cond"] - q_cond_ua,
             m_ref_cascade - ref["m_ref_valve_cascade"],
             m_ref_dock - ref["m_ref_valve_dock"],
-            m_ref - ref["m_ref_compressor"],
+            ref_mass_balance,
         ]
         if self.high_pressure_receiver_enabled():
             residuals.append(self._receiver_mass_balance_residual(receiver_mass_kg, prev_receiver_mass_kg, ref, dt_s))
@@ -2349,6 +3130,17 @@ class CascadeSystemModel:
             prev_idx = 1 + (1 if self.high_pressure_receiver_enabled() else 0)
             prev_subcooling_k = prev_state[prev_idx] if len(prev_state) > prev_idx else subcooling_k
             residuals.append(self._lpr_subcooling_balance_residual(subcooling_k, prev_subcooling_k, ref, dt_s))
+        if self.lpr_inventory_enabled():
+            residuals.extend(
+                self._lpr_inventory_balance_residuals(
+                    lpr_liquid_mass_kg,
+                    lpr_vapor_mass_kg,
+                    prev_lpr_liquid_mass_kg,
+                    prev_lpr_vapor_mass_kg,
+                    ref,
+                    dt_s,
+                )
+            )
         if ref["uses_map_cooling_capacity_balance"]:
             residuals.append(ref["q_map_capacity_balance_error"])
         return np.asarray(residuals, dtype=float)
@@ -2360,6 +3152,9 @@ class CascadeSystemModel:
         if self.lpr_subcooling_control_enabled():
             idx = 5 + (1 if self.high_pressure_receiver_enabled() else 0)
             steady_state.append(float(unknowns[idx]))
+        if self.lpr_inventory_enabled():
+            idx = self._lpr_inventory_index(5)
+            steady_state.extend([float(unknowns[idx]), float(unknowns[idx + 1])])
         steady_state = np.array(steady_state, dtype=float)
         return self.vcc_residual(unknowns, steady_state, time_s, dt_s=1.0)
 
@@ -2367,6 +3162,8 @@ class CascadeSystemModel:
         sink_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock = unknowns[:5]
         receiver_mass_kg = self._vcc_receiver_unknown_mass(unknowns)
         subcooling_k = self._lpr_subcooling_unknown(unknowns, 5)
+        lpr_liquid_mass_kg = self._lpr_liquid_mass_unknown(unknowns, 5)
+        lpr_vapor_mass_kg = self._lpr_vapor_mass_unknown(unknowns, 5)
         m_ref = self.effective_refrigerant_mass_flow(m_ref_cascade, m_ref_dock)
         tevap_k = tevap_c + KELVIN_OFFSET
         tcond_k = tcond_c + KELVIN_OFFSET
@@ -2381,6 +3178,8 @@ class CascadeSystemModel:
             loads["dock_w"],
             receiver_mass_kg,
             subcooling_k,
+            lpr_liquid_mass_kg,
+            lpr_vapor_mass_kg,
         )
         branch_holdup = self._branch_holdup_outputs(ref, tevap_k, time_s)
         condenser_ua = self._vcc_condenser_ua_result()
@@ -2479,19 +3278,43 @@ class CascadeSystemModel:
             "base_vcc_dock_load_w": loads["dock_w"],
             "load_w": loads["total_w"],
         }
+        values.update(self._lpr_inventory_output_values(ref))
         state_vector = [sink_c]
         if self.high_pressure_receiver_enabled():
             state_vector.append(receiver_mass_kg)
         if self.lpr_subcooling_control_enabled():
             state_vector.append(subcooling_k)
+        if self.lpr_inventory_enabled():
+            state_vector.extend([lpr_liquid_mass_kg, lpr_vapor_mass_kg])
         return StepResult(values=values, state_vector=np.array(state_vector, dtype=float))
 
     def residual(self, unknowns: np.ndarray, prev_state: np.ndarray, time_s: float, dt_s: float) -> np.ndarray:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns[:10]
         receiver_mass_kg = self._receiver_unknown_mass(unknowns)
         subcooling_k = self._lpr_subcooling_unknown(unknowns, 10)
+        lpr_liquid_mass_kg = self._lpr_liquid_mass_unknown(unknowns, 10)
+        lpr_vapor_mass_kg = self._lpr_vapor_mass_unknown(unknowns, 10)
+        regenerator_cells_c = self._cascade_regenerator_cells_c(unknowns)
+        cascade_exchanger_cells_c = self._cascade_exchanger_cells_c(unknowns)
         m_ref = self.effective_refrigerant_mass_flow(m_ref_cascade, m_ref_dock)
         prev_room_c, prev_sink_c, prev_dock_c = prev_state[:3]
+        prev_lpr_idx = 4 + (1 if self.high_pressure_receiver_enabled() else 0) + (1 if self.lpr_subcooling_control_enabled() else 0)
+        prev_lpr_liquid_mass_kg = prev_state[prev_lpr_idx] if self.lpr_inventory_enabled() and len(prev_state) > prev_lpr_idx else lpr_liquid_mass_kg
+        prev_lpr_vapor_mass_kg = (
+            prev_state[prev_lpr_idx + 1] if self.lpr_inventory_enabled() and len(prev_state) > prev_lpr_idx + 1 else lpr_vapor_mass_kg
+        )
+        prev_dynamic_idx = self._cascade_dynamic_state_index()
+        prev_regenerator_cells_c = (
+            np.asarray(prev_state[prev_dynamic_idx : prev_dynamic_idx + regenerator_cells_c.size], dtype=float)
+            if regenerator_cells_c.size > 0 and len(prev_state) >= prev_dynamic_idx + regenerator_cells_c.size
+            else regenerator_cells_c.copy()
+        )
+        prev_cascade_idx = prev_dynamic_idx + regenerator_cells_c.size
+        prev_cascade_exchanger_cells_c = (
+            np.asarray(prev_state[prev_cascade_idx : prev_cascade_idx + cascade_exchanger_cells_c.size], dtype=float)
+            if cascade_exchanger_cells_c.size > 0 and len(prev_state) >= prev_cascade_idx + cascade_exchanger_cells_c.size
+            else cascade_exchanger_cells_c.copy()
+        )
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
         t3_k = t3_c + KELVIN_OFFSET
@@ -2514,19 +3337,34 @@ class CascadeSystemModel:
             air = self._evaluate_air_cycle(room_k, t3_k, t4_k, t6_k)
             dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
             q_dock_evap = dock_evap["q_w"]
+            hx_uas = self._heat_exchanger_uas(air)
+            transient_reg = None
+            if regenerator_cells_c.size > 0:
+                transient_reg = self._standalone_dynamic_regenerator_result(room_k, t3_k, regenerator_cells_c, air["m_air"])
+            cascade_exchanger = None
+            q_cascade_for_refrigerant = air["q_cascade"]
+            if cascade_exchanger_cells_c.size > 0:
+                cascade_exchanger = self._evaluate_lumped_cascade_exchanger(
+                    air,
+                    tevap_k,
+                    cascade_exchanger_cells_c,
+                    hx_uas["cascade"],
+                )
+                q_cascade_for_refrigerant = float(cascade_exchanger["q_refrigerant_w"])
             ref = self._evaluate_refrigerant_cycle(
                 tevap_k,
                 tcond_k,
                 m_ref_cascade,
                 m_ref_dock,
-                air["q_cascade"],
+                q_cascade_for_refrigerant,
                 q_dock_evap,
                 receiver_mass_kg,
                 subcooling_k,
+                lpr_liquid_mass_kg,
+                lpr_vapor_mass_kg,
             )
-            hx_uas = self._heat_exchanger_uas(air)
         except ValueError:
-            size = 10 + self._receiver_extra_residual_count()
+            size = int(np.asarray(unknowns, dtype=float).size)
             return np.full(size, 1.0e9, dtype=float)
 
         t2_c = air["t2_k"] - KELVIN_OFFSET
@@ -2540,22 +3378,32 @@ class CascadeSystemModel:
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - ambient_c)
         room_load_w = self.load_w(time_s)
         dock_load_w = self.dock_load_w(time_s)
-        if ref["uses_map_cooling_capacity_balance"]:
+        if cascade_exchanger is not None:
+            cascade_balance = t3_c - (float(cascade_exchanger["t3_k"]) - KELVIN_OFFSET)
+        elif ref["uses_map_cooling_capacity_balance"]:
             cascade_balance = ref["q_evap_load_requested"] - ref["compressor_map_q_w"]
         else:
             cascade_balance = air["q_cascade"] - q_cascade_ua
 
+        if transient_reg is not None:
+            regenerator_hot_balance = t4_c - (float(transient_reg["t4_k"]) - KELVIN_OFFSET)
+            regenerator_cold_balance = t6_c - (float(transient_reg["t6_k"]) - KELVIN_OFFSET)
+        else:
+            regenerator_hot_balance = air["q_reg_hot"] - air["q_reg_cold"]
+            regenerator_cold_balance = air["q_reg_hot"] - q_reg_ua
+
+        ref_mass_balance = ref["lpr_volume_residual_m3"] if self.lpr_inventory_enabled() else m_ref - ref["m_ref_compressor"]
         residuals = [
             room_c - prev_room_c - dt_s * (room_load_w - air["q_room"]) / caps["room_capacitance_j_k"],
             dock_c - prev_dock_c - dt_s * (dock_load_w - q_dock_evap) / caps["dock_capacitance_j_k"],
             sink_c - prev_sink_c - dt_s * (ref["q_cond"] - sink_rejection) / caps["sink_capacitance_j_k"],
-            air["q_reg_hot"] - air["q_reg_cold"],
-            air["q_reg_hot"] - q_reg_ua,
+            regenerator_hot_balance,
+            regenerator_cold_balance,
             cascade_balance,
             ref["q_cond"] - q_cond_ua,
             m_ref_cascade - ref["m_ref_valve_cascade"],
             m_ref_dock - ref["m_ref_valve_dock"],
-            m_ref - ref["m_ref_compressor"],
+            ref_mass_balance,
         ]
         if self.high_pressure_receiver_enabled():
             prev_receiver_mass_kg = prev_state[4] if len(prev_state) > 4 else receiver_mass_kg
@@ -2564,6 +3412,37 @@ class CascadeSystemModel:
             prev_idx = 4 + (1 if self.high_pressure_receiver_enabled() else 0)
             prev_subcooling_k = prev_state[prev_idx] if len(prev_state) > prev_idx else subcooling_k
             residuals.append(self._lpr_subcooling_balance_residual(subcooling_k, prev_subcooling_k, ref, dt_s))
+        if self.lpr_inventory_enabled():
+            residuals.extend(
+                self._lpr_inventory_balance_residuals(
+                    lpr_liquid_mass_kg,
+                    lpr_vapor_mass_kg,
+                    prev_lpr_liquid_mass_kg,
+                    prev_lpr_vapor_mass_kg,
+                    ref,
+                    dt_s,
+                )
+            )
+        if transient_reg is not None:
+            reg_cfg = self._standalone_transient_regenerator_config()
+            solid_capacitances = self._standalone_regenerator_capacitances_j_k(reg_cfg, regenerator_cells_c.size)
+            residuals.extend(
+                (
+                    regenerator_cells_c
+                    - prev_regenerator_cells_c
+                    - float(dt_s) * np.asarray(transient_reg["q_reg_solid_net_w"], dtype=float) / solid_capacitances
+                ).tolist()
+            )
+        if cascade_exchanger is not None:
+            cascade_cfg = self._cascade_exchanger_config()
+            solid_capacitances = self._cascade_exchanger_capacitances_j_k(cascade_cfg, cascade_exchanger_cells_c.size)
+            residuals.extend(
+                (
+                    cascade_exchanger_cells_c
+                    - prev_cascade_exchanger_cells_c
+                    - float(dt_s) * np.asarray(cascade_exchanger["q_matrix_net_w"], dtype=float) / solid_capacitances
+                ).tolist()
+            )
         return np.asarray(residuals, dtype=float)
 
     def steady_state_residual(self, unknowns: np.ndarray, time_s: float) -> np.ndarray:
@@ -2573,6 +3452,15 @@ class CascadeSystemModel:
         if self.lpr_subcooling_control_enabled():
             idx = 10 + (1 if self.high_pressure_receiver_enabled() else 0)
             steady_state.append(float(unknowns[idx]))
+        if self.lpr_inventory_enabled():
+            idx = self._lpr_inventory_index(10)
+            steady_state.extend([float(unknowns[idx]), float(unknowns[idx + 1])])
+        regenerator_cells_c = self._cascade_regenerator_cells_c(unknowns)
+        cascade_exchanger_cells_c = self._cascade_exchanger_cells_c(unknowns)
+        if regenerator_cells_c.size > 0:
+            steady_state.extend([float(value) for value in regenerator_cells_c])
+        if cascade_exchanger_cells_c.size > 0:
+            steady_state.extend([float(value) for value in cascade_exchanger_cells_c])
         steady_state = np.array(steady_state, dtype=float)
         return self.residual(unknowns, steady_state, time_s, dt_s=1.0)
 
@@ -2588,6 +3476,10 @@ class CascadeSystemModel:
         room_c, sink_c, t3_c, t4_c, t6_c, tevap_c, tcond_c, m_ref_cascade, m_ref_dock, dock_c = unknowns[:10]
         receiver_mass_kg = self._receiver_unknown_mass(unknowns)
         subcooling_k = self._lpr_subcooling_unknown(unknowns, 10)
+        lpr_liquid_mass_kg = self._lpr_liquid_mass_unknown(unknowns, 10)
+        lpr_vapor_mass_kg = self._lpr_vapor_mass_unknown(unknowns, 10)
+        regenerator_cells_c = self._cascade_regenerator_cells_c(unknowns)
+        cascade_exchanger_cells_c = self._cascade_exchanger_cells_c(unknowns)
         m_ref = self.effective_refrigerant_mass_flow(m_ref_cascade, m_ref_dock)
         room_k = room_c + KELVIN_OFFSET
         sink_k = sink_c + KELVIN_OFFSET
@@ -2603,15 +3495,30 @@ class CascadeSystemModel:
         dock_evap = self._evaluate_dock_evaporator(dock_c, tevap_c)
         q_dock = dock_evap["q_w"]
         infiltration = self.infiltration_disturbance_w(time_s)
+        transient_reg = None
+        if regenerator_cells_c.size > 0:
+            transient_reg = self._standalone_dynamic_regenerator_result(room_k, t3_k, regenerator_cells_c, air["m_air"])
+        cascade_exchanger = None
+        q_cascade_for_refrigerant = air["q_cascade"]
+        if cascade_exchanger_cells_c.size > 0:
+            cascade_exchanger = self._evaluate_lumped_cascade_exchanger(
+                air,
+                tevap_k,
+                cascade_exchanger_cells_c,
+                hx_uas["cascade"],
+            )
+            q_cascade_for_refrigerant = float(cascade_exchanger["q_refrigerant_w"])
         ref = self._evaluate_refrigerant_cycle(
             tevap_k,
             tcond_k,
             m_ref_cascade,
             m_ref_dock,
-            air["q_cascade"],
+            q_cascade_for_refrigerant,
             q_dock,
             receiver_mass_kg,
             subcooling_k,
+            lpr_liquid_mass_kg,
+            lpr_vapor_mass_kg,
         )
         branch_holdup = self._branch_holdup_outputs(ref, tevap_k, time_s)
         air_input_power = self._air_cycle_input_power(air, air_cfg)
@@ -2683,6 +3590,10 @@ class CascadeSystemModel:
             "air_compressor_suction_density_kg_m3": air["rho1"],
             "air_compressor_suction_mixture_density_kg_m3": air["rho1_mixture"],
             "air_compressor_volumetric_flow_m3_s": air["m_air"] / max(air["rho1"], 1.0e-9),
+            "air_compressor_map_volumetric_flow_cfm": air["map_q_cfm"],
+            "air_compressor_map_speed_eval_rpm": air["map_speed_eval_rpm"],
+            "air_compressor_map_head_eval_ft": air["map_head_eval_ft"],
+            "air_compressor_map_d_q_d_speed_m3_s_per_rpm": air["map_d_q_d_speed_m3_s_per_rpm"],
             "air_compressor_actual_head_j_kg": air["compressor_head_actual"],
             "air_compressor_actual_head_m": air["compressor_head_actual"] / 9.80665,
             "air_compressor_isentropic_head_j_kg": air["compressor_head_is"],
@@ -2784,9 +3695,82 @@ class CascadeSystemModel:
             "load_w": self.load_w(time_s),
             "dock_load_w": self.dock_load_w(time_s),
         }
+        if transient_reg is not None:
+            reg_cfg = self._standalone_transient_regenerator_config()
+            reg_capacitances = self._standalone_regenerator_capacitances_j_k(reg_cfg, regenerator_cells_c.size)
+            values.update(
+                {
+                    "regenerator_model_transient": 1.0,
+                    "regenerator_model_lumped_matrix": 1.0
+                    if str(transient_reg.get("regenerator_model", "")).strip().lower() == "lumped_matrix"
+                    else 0.0,
+                    "regenerator_model_two_lump_matrix": 1.0
+                    if str(transient_reg.get("regenerator_model", "")).strip().lower() == "two_lump_matrix"
+                    else 0.0,
+                    "regenerator_cell_count": transient_reg["regenerator_cell_count"],
+                    "regenerator_gas_effectiveness": transient_reg["regenerator_gas_effectiveness"],
+                    "regenerator_solid_capacitance_j_k": float(np.sum(reg_capacitances)),
+                    "regenerator_solid_capacitance_per_cell_j_k": float(np.mean(reg_capacitances)),
+                    "regenerator_solid_mean_k": transient_reg["regenerator_solid_mean_k"],
+                    "regenerator_matrix_k": transient_reg["regenerator_solid_mean_k"],
+                    "regenerator_matrix_c": float(transient_reg["regenerator_solid_mean_k"]) - KELVIN_OFFSET,
+                    "regenerator_solid_min_k": transient_reg["regenerator_solid_min_k"],
+                    "regenerator_solid_max_k": transient_reg["regenerator_solid_max_k"],
+                    "regenerator_q_hot_to_solid_w": transient_reg["q_reg_hot_w"],
+                    "regenerator_q_solid_to_cold_w": transient_reg["q_reg_cold_w"],
+                    "regenerator_q_solid_net_total_w": float(np.sum(np.asarray(transient_reg["q_reg_solid_net_w"], dtype=float))),
+                    "regenerator_q_heat_leak_w": transient_reg["q_reg_heat_leak_w"],
+                    "regenerator_q_hot_to_cold_w": transient_reg.get("regenerator_q_hot_to_cold_w", float("nan")),
+                }
+            )
+            for idx, value in enumerate(np.asarray(transient_reg["regenerator_solid_k"], dtype=float), start=1):
+                values[f"regenerator_cell_{idx}_k"] = float(value)
+                values[f"regenerator_cell_{idx}_c"] = float(value) - KELVIN_OFFSET
+        else:
+            values["regenerator_model_transient"] = 0.0
+            values["regenerator_model_lumped_matrix"] = 0.0
+            values["regenerator_model_two_lump_matrix"] = 0.0
+
+        if cascade_exchanger is not None:
+            cascade_cfg = self._cascade_exchanger_config()
+            cascade_capacitances = self._cascade_exchanger_capacitances_j_k(cascade_cfg, cascade_exchanger_cells_c.size)
+            matrix_values_k = np.asarray(cascade_exchanger["matrix_k"], dtype=float)
+            values.update(
+                {
+                    "cascade_exchanger_model_lumped": 1.0,
+                    "cascade_exchanger_cell_count": cascade_exchanger["cell_count"],
+                    "cascade_exchanger_solid_capacitance_j_k": float(np.sum(cascade_capacitances)),
+                    "cascade_exchanger_solid_capacitance_per_cell_j_k": float(np.mean(cascade_capacitances)),
+                    "cascade_exchanger_matrix_mean_k": cascade_exchanger["matrix_mean_k"],
+                    "cascade_exchanger_matrix_mean_c": float(cascade_exchanger["matrix_mean_k"]) - KELVIN_OFFSET,
+                    "cascade_exchanger_matrix_min_k": cascade_exchanger["matrix_min_k"],
+                    "cascade_exchanger_matrix_max_k": cascade_exchanger["matrix_max_k"],
+                    "cascade_exchanger_q_air_to_matrix_w": cascade_exchanger["q_air_to_matrix_w"],
+                    "cascade_exchanger_q_matrix_to_refrigerant_w": cascade_exchanger["q_refrigerant_w"],
+                    "cascade_exchanger_q_matrix_net_total_w": float(np.sum(np.asarray(cascade_exchanger["q_matrix_net_w"], dtype=float))),
+                    "cascade_exchanger_q_heat_leak_w": cascade_exchanger["q_heat_leak_w"],
+                    "cascade_exchanger_air_side_ua_w_k": cascade_exchanger["ua_air_w_k"],
+                    "cascade_exchanger_refrigerant_side_ua_w_k": cascade_exchanger["ua_refrigerant_w_k"],
+                    "cascade_exchanger_air_effectiveness": cascade_exchanger["air_effectiveness"],
+                    "cascade_exchanger_air_capacity_rate_w_k": cascade_exchanger["air_capacity_rate_w_k"],
+                }
+            )
+            for idx, value in enumerate(matrix_values_k, start=1):
+                values[f"cascade_exchanger_cell_{idx}_k"] = float(value)
+                values[f"cascade_exchanger_cell_{idx}_c"] = float(value) - KELVIN_OFFSET
+        else:
+            values["cascade_exchanger_model_lumped"] = 0.0
+
+        values.update(self._lpr_inventory_output_values(ref))
         state_vector = [room_c, sink_c, dock_c, self._room_moisture.humidity_ratio]
         if self.high_pressure_receiver_enabled():
             state_vector.append(receiver_mass_kg)
         if self.lpr_subcooling_control_enabled():
             state_vector.append(subcooling_k)
+        if self.lpr_inventory_enabled():
+            state_vector.extend([lpr_liquid_mass_kg, lpr_vapor_mass_kg])
+        if regenerator_cells_c.size > 0:
+            state_vector.extend([float(value) for value in regenerator_cells_c])
+        if cascade_exchanger_cells_c.size > 0:
+            state_vector.extend([float(value) for value in cascade_exchanger_cells_c])
         return StepResult(values=values, state_vector=np.array(state_vector, dtype=float))

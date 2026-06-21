@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "message": "`xtol` termination condition is satisfied.",
+  "nfev": 15,
+  "cost": 11112.701935242958,
+  "model": "counterflow_cells",
+  "fit_initial_solid": false,
+  "fitted": {
+    "ua_w_k": 3131.579487017742,
+    "solid_capacitance_j_k": 2639.113119310237,
+    "hot_solid_capacitance_j_k": null,
+    "cold_solid_capacitance_j_k": null,
+    "initial_solid_k": 300.0
+  },
+  "metrics": {
+    "outlet_rmse_k": 21.723204256399523,
+    "inlet_rmse_k": 19.877249187741153,
+    "mean_rmse_k": 20.800226722070338,
+    "outlet_mae_k": 19.935037829843733,
+    "inlet_mae_k": 17.72577289469647,
+    "outlet_mean_error_k": 14.16586815423638,
+    "inlet_mean_error_k": 14.064673934972461,
+    "outlet_final_error_k": 27.64426259354866,
+    "inlet_final_error_k": 28.41387702466352
+  },
+  "residual_norm_k": 254.84977008988474,
+  "files": {
+    "fitted_config": "config\\yang_validation_counterflow_4cell_fitted.json",
+    "output_csv": "outputs\\yang_validation_counterflow_4cell.csv",
+    "output_plot": "outputs\\yang_validation_counterflow_4cell.png",
+    "outlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+    "inlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv"
+  }
+}

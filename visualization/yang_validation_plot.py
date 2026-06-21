@@ -142,7 +142,15 @@ def compare_trace(
     return result, summary
 
 
-def save_single_trace_plot(
+def trace_style(label: str) -> tuple[str, str, str, str]:
+    title = "Expander outlet temperature" if label == "expander_outlet" else "Expander inlet temperature"
+    model_color = OKABE_ITO["blue"] if label == "expander_outlet" else OKABE_ITO["bluish_green"]
+    data_color = OKABE_ITO["vermillion"] if label == "expander_outlet" else OKABE_ITO["orange"]
+    marker = "o" if label == "expander_outlet" else "s"
+    return title, model_color, data_color, marker
+
+
+def save_single_trace_data_plot(
     model: pd.DataFrame,
     result: pd.DataFrame,
     summary: dict[str, float | str | int],
@@ -152,22 +160,12 @@ def save_single_trace_plot(
     output_path: Path,
 ) -> None:
     experiment_col = f"{label}_experiment_k"
-    residual_col = f"{label}_residual_model_minus_experiment_k"
-    title = "Expander outlet temperature" if label == "expander_outlet" else "Expander inlet temperature"
-    model_color = OKABE_ITO["blue"] if label == "expander_outlet" else OKABE_ITO["bluish_green"]
-    data_color = OKABE_ITO["vermillion"] if label == "expander_outlet" else OKABE_ITO["orange"]
-    marker = "o" if label == "expander_outlet" else "s"
+    title, model_color, data_color, marker = trace_style(label)
 
-    fig, axes = plt.subplots(
-        nrows=2,
-        ncols=1,
-        figsize=(10.5, 7.0),
-        sharex=True,
-        gridspec_kw={"height_ratios": [3.0, 1.15]},
-    )
+    fig, ax = plt.subplots(figsize=(10.5, 5.4))
 
-    axes[0].plot(model["time_min"], model[model_column], color=model_color, linewidth=2.4, label=f"Model {model_column}")
-    axes[0].scatter(
+    ax.plot(model["time_min"], model[model_column], color=model_color, linewidth=2.4, label=f"Model {model_column}")
+    ax.scatter(
         result["time_min"],
         result[experiment_col],
         color=data_color,
@@ -176,10 +174,11 @@ def save_single_trace_plot(
         label="Yang test 1 data",
         zorder=3,
     )
-    axes[0].set_ylabel("Temperature (K)")
-    axes[0].set_title(title, loc="left")
-    axes[0].legend(frameon=False, loc="best")
-    axes[0].text(
+    ax.set_ylabel("Temperature (K)")
+    ax.set_xlabel("Time (min)")
+    ax.set_title(title, loc="left")
+    ax.legend(frameon=False, loc="best")
+    ax.text(
         0.02,
         0.04,
         (
@@ -187,26 +186,49 @@ def save_single_trace_plot(
             f"MAE {summary['mae_k']:.2f} K | "
             f"final error {summary['final_error_k']:+.2f} K"
         ),
-        transform=axes[0].transAxes,
+        transform=ax.transAxes,
         fontsize=12,
         bbox={"facecolor": "white", "edgecolor": "0.35", "alpha": 0.9, "boxstyle": "square,pad=0.3"},
     )
 
-    axes[1].axhline(0.0, color=OKABE_ITO["black"], linewidth=1.2)
-    axes[1].plot(result["time_min"], result[residual_col], color=model_color, linewidth=2.1)
-    axes[1].set_ylabel("Residual (K)")
-    axes[1].set_xlabel("Time (min)")
-
-    for ax in axes:
-        style_axes(ax)
-
-    fig.align_ylabels(axes)
-    fig.tight_layout(h_pad=0.9)
+    style_axes(ax)
+    fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
 
 
-def save_two_trace_plot(
+def save_single_trace_residual_plot(
+    result: pd.DataFrame,
+    *,
+    label: str,
+    output_path: Path,
+) -> None:
+    residual_col = f"{label}_residual_model_minus_experiment_k"
+    title, model_color, _, marker = trace_style(label)
+
+    fig, ax = plt.subplots(figsize=(10.5, 3.8))
+    ax.axhline(0.0, color=OKABE_ITO["black"], linewidth=1.2)
+    ax.plot(
+        result["time_min"],
+        result[residual_col],
+        color=model_color,
+        linewidth=2.1,
+        marker=marker,
+        markersize=4.0,
+        label="Model - Yang test 1 data",
+    )
+    ax.set_ylabel("Residual (K)")
+    ax.set_xlabel("Time (min)")
+    ax.set_title(f"{title} residual", loc="left")
+    ax.legend(frameon=False, loc="best")
+
+    style_axes(ax)
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_two_trace_data_plot(
     model: pd.DataFrame,
     outlet: pd.DataFrame,
     inlet: pd.DataFrame,
@@ -215,16 +237,10 @@ def save_two_trace_plot(
     output_path: Path,
 ) -> None:
     score = 0.5 * (float(outlet_summary["rmse_k"]) + float(inlet_summary["rmse_k"]))
-    fig, axes = plt.subplots(
-        nrows=2,
-        ncols=1,
-        figsize=(11.5, 8.2),
-        sharex=True,
-        gridspec_kw={"height_ratios": [3.2, 1.2]},
-    )
+    fig, ax = plt.subplots(figsize=(11.5, 5.9))
 
-    axes[0].plot(model["time_min"], model["t5_k"], color=OKABE_ITO["blue"], linewidth=2.5, label="Model outlet, $T_5$")
-    axes[0].scatter(
+    ax.plot(model["time_min"], model["t5_k"], color=OKABE_ITO["blue"], linewidth=2.5, label="Model outlet, $T_5$")
+    ax.scatter(
         outlet["time_min"],
         outlet["expander_outlet_experiment_k"],
         color=OKABE_ITO["vermillion"],
@@ -233,7 +249,7 @@ def save_two_trace_plot(
         label="Yang outlet data",
         zorder=3,
     )
-    axes[0].plot(
+    ax.plot(
         model["time_min"],
         model["t4_k"],
         color=OKABE_ITO["bluish_green"],
@@ -241,7 +257,7 @@ def save_two_trace_plot(
         linestyle="--",
         label="Model inlet, $T_4$",
     )
-    axes[0].scatter(
+    ax.scatter(
         inlet["time_min"],
         inlet["expander_inlet_experiment_k"],
         color=OKABE_ITO["orange"],
@@ -250,10 +266,11 @@ def save_two_trace_plot(
         label="Yang inlet data",
         zorder=3,
     )
-    axes[0].set_ylabel("Temperature (K)")
-    axes[0].set_title("Yang test 1 validation: expander inlet and outlet", loc="left")
-    axes[0].legend(frameon=False, loc="best", ncols=2)
-    axes[0].text(
+    ax.set_ylabel("Temperature (K)")
+    ax.set_xlabel("Time (min)")
+    ax.set_title("Yang test 1 validation: expander inlet and outlet", loc="left")
+    ax.legend(frameon=False, loc="best", ncols=2)
+    ax.text(
         0.02,
         0.04,
         (
@@ -261,36 +278,51 @@ def save_two_trace_plot(
             f"Inlet RMSE {inlet_summary['rmse_k']:.2f} K | "
             f"Mean RMSE {score:.2f} K"
         ),
-        transform=axes[0].transAxes,
+        transform=ax.transAxes,
         fontsize=12,
         bbox={"facecolor": "white", "edgecolor": "0.35", "alpha": 0.9, "boxstyle": "square,pad=0.3"},
     )
 
-    axes[1].axhline(0.0, color=OKABE_ITO["black"], linewidth=1.2)
-    axes[1].plot(
+    style_axes(ax)
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_two_trace_residual_plot(
+    outlet: pd.DataFrame,
+    inlet: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(11.5, 4.2))
+
+    ax.axhline(0.0, color=OKABE_ITO["black"], linewidth=1.2)
+    ax.plot(
         outlet["time_min"],
         outlet["expander_outlet_residual_model_minus_experiment_k"],
         color=OKABE_ITO["blue"],
         linewidth=2.2,
+        marker="o",
+        markersize=4.0,
         label="Outlet residual",
     )
-    axes[1].plot(
+    ax.plot(
         inlet["time_min"],
         inlet["expander_inlet_residual_model_minus_experiment_k"],
         color=OKABE_ITO["bluish_green"],
         linewidth=2.2,
         linestyle="--",
+        marker="s",
+        markersize=4.0,
         label="Inlet residual",
     )
-    axes[1].set_ylabel("Model - data (K)")
-    axes[1].set_xlabel("Time (min)")
-    axes[1].legend(frameon=False, loc="best")
+    ax.set_ylabel("Model - data (K)")
+    ax.set_xlabel("Time (min)")
+    ax.set_title("Yang test 1 residuals", loc="left")
+    ax.legend(frameon=False, loc="best")
 
-    for ax in axes:
-        style_axes(ax)
-
-    fig.align_ylabels(axes)
-    fig.tight_layout(h_pad=0.9)
+    style_axes(ax)
+    fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
 
@@ -301,7 +333,13 @@ def build_arg_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--outlet-data", help="Yang expander outlet CSV, semicolon-delimited with decimal commas.")
     parser.add_argument("--inlet-data", help="Yang expander inlet CSV, semicolon-delimited with decimal commas.")
     parser.add_argument("--output-dir", default=str(project_root / "outputs"), help="Directory for generated plots and summaries.")
-    parser.add_argument("--combined-name", default="yang_validation_two_trace_fit.png", help="Combined plot filename.")
+    parser.add_argument("--combined-name", help="Deprecated alias for --combined-data-name.")
+    parser.add_argument("--combined-data-name", default="yang_validation_two_trace_fit_data.png", help="Combined temperature plot filename.")
+    parser.add_argument(
+        "--combined-residual-name",
+        default="yang_validation_two_trace_fit_residuals.png",
+        help="Combined residual plot filename.",
+    )
     return parser
 
 
@@ -366,10 +404,27 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    combined_data_name = args.combined_name or args.combined_data_name
+    single_trace_plots = {
+        "outlet_data": "yang_validation_outlet_vs_test1_data.png",
+        "outlet_residuals": "yang_validation_outlet_vs_test1_residuals.png",
+        "inlet_data": "yang_validation_inlet_vs_test1_data.png",
+        "inlet_residuals": "yang_validation_inlet_vs_test1_residuals.png",
+    }
+    combined_plots = {
+        "data": combined_data_name,
+        "residuals": args.combined_residual_name,
+    }
+
     combined_summary = {
         "mapping": {
             outlet_path.name: "expander_outlet -> model t5_k",
             inlet_path.name: "expander_inlet -> model t4_k",
+        },
+        "plots": {
+            **single_trace_plots,
+            "combined_data": combined_plots["data"],
+            "combined_residuals": combined_plots["residuals"],
         },
         "combined_score_mean_rmse_k": 0.5 * (float(outlet_summary["rmse_k"]) + float(inlet_summary["rmse_k"])),
         "outlet": outlet_summary,
@@ -380,29 +435,44 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    save_single_trace_plot(
+    save_single_trace_data_plot(
         model,
         outlet,
         outlet_summary,
         label="expander_outlet",
         model_column="t5_k",
-        output_path=output_dir / "yang_validation_outlet_vs_test1.png",
+        output_path=output_dir / single_trace_plots["outlet_data"],
     )
-    save_single_trace_plot(
+    save_single_trace_residual_plot(
+        outlet,
+        label="expander_outlet",
+        output_path=output_dir / single_trace_plots["outlet_residuals"],
+    )
+    save_single_trace_data_plot(
         model,
         inlet,
         inlet_summary,
         label="expander_inlet",
         model_column="t4_k",
-        output_path=output_dir / "yang_validation_inlet_vs_test1.png",
+        output_path=output_dir / single_trace_plots["inlet_data"],
     )
-    save_two_trace_plot(
+    save_single_trace_residual_plot(
+        inlet,
+        label="expander_inlet",
+        output_path=output_dir / single_trace_plots["inlet_residuals"],
+    )
+    save_two_trace_data_plot(
         model,
         outlet,
         inlet,
         outlet_summary,
         inlet_summary,
-        output_path=output_dir / args.combined_name,
+        output_path=output_dir / combined_plots["data"],
+    )
+    save_two_trace_residual_plot(
+        outlet,
+        inlet,
+        output_path=output_dir / combined_plots["residuals"],
     )
 
     print(json.dumps(combined_summary, indent=2))

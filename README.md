@@ -76,58 +76,15 @@ python -m src.cascade_dynamics.main --config config/validation_air_cycle_water_l
 python -m src.cascade_dynamics.main --config config/validation_vcc_fixed_load.json --property-backend coolprop
 ```
 
-## Salgado Thesis VCC Validation
+## Air Compressor Map
 
-The isolated VCC mode includes direct Salgado thesis validation cases for the three warm-side layouts:
+The reverse-Brayton air compressor uses a trimmed head/speed performance map fitted over the peak-efficiency minus 3% range. The map evaluates volumetric flow as `Q = f(H_isen, N)` and isentropic efficiency as `eta_is = f(H_isen, N)`, with the valid map head range `4672.2` to `7266.1 ft`, speed in RPM, and flow in CFM. The simulator converts `H_isen` from J/kg to ft, converts map flow from CFM to m3/s, and computes dry-air mass flow as:
 
-```powershell
-# Layout A: high-pressure receiver, Table 3.4 frequency sweep
-python -m src.cascade_dynamics.main --config config/salgado_layout_a_hpr_25hz.json --property-backend coolprop
-python -m src.cascade_dynamics.main --config config/salgado_layout_a_hpr_30hz.json --property-backend coolprop
-python -m src.cascade_dynamics.main --config config/salgado_layout_a_hpr_35hz.json --property-backend coolprop
-python -m src.cascade_dynamics.main --config config/salgado_layout_a_hpr_40hz.json --property-backend coolprop
-python -m src.cascade_dynamics.main --config config/salgado_layout_a_hpr_43hz.json --property-backend coolprop
-
-# Layout B: condenser subcooler, Tables 3.11-3.14
-python -m src.cascade_dynamics.main --config config/salgado_layout_b_csc_charge_1p88kg.json --property-backend coolprop
-python -m src.cascade_dynamics.main --config config/salgado_layout_b_csc_charge_2p02kg.json --property-backend coolprop
-
-# Layout C: low-pressure receiver concepts, Tables 4.1-4.7 and Appendix C
-python -m src.cascade_dynamics.main --config config/salgado_layout_c_lpr_concept1_bitzer.json --property-backend coolprop
-python -m src.cascade_dynamics.main --config config/salgado_layout_c_lpr_concept2_gea.json --property-backend coolprop
+```text
+m_air = Q * rho_suction
 ```
 
-Layout behavior is selected with `vcc_cycle.layout`:
-
-```json
-{
-  "vcc_cycle": {
-    "layout": "hpr",
-    "subcooling_k": 0.0,
-    "receiver": {
-      "enabled": true,
-      "force_saturated_liquid_outlet": true
-    }
-  }
-}
-```
-
-- `hpr` forces the valve inlet to saturated liquid at condenser pressure.
-- `csc` uses the configured condenser outlet subcooling and reports `refrigerant_q_subcooler_w`.
-- `lpr` forces compressor suction to saturated vapor and should use subcooling control on the EEV instead of superheat control.
-
-The LPR concept configs use Appendix C pressure-ratio polynomials through:
-
-```json
-{
-  "compressor": {
-    "model": "screw_pressure_ratio_polynomial",
-    "preset": "bitzer_osha7462_k"
-  }
-}
-```
-
-Available presets are `bitzer_osha7462_k` and `gea_eb_7a`; configs may also provide `eta_is_coefficients` and `eta_v_coefficients` directly. The current isolated VCC model still represents heat exchangers as lumped UA components. Yang et al. single-phase PHE heat-transfer correlations therefore require a future finite-zone PHE model before they can replace water-side or superheated/subcooled-zone correlations without bypassing the existing UA formulation.
+The compressor actual enthalpy rise is then calculated from the mapped isentropic efficiency. For map-driven air-compressor speed control, the valid speed range is clamped to `10000` to `18000` RPM at runtime; older configs with `u_max: 20000` are constrained before PID updates.
 
 ## Dynamic Heat-Exchanger UA
 

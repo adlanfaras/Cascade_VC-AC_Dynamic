@@ -1,0 +1,31 @@
+{
+  "success": true,
+  "message": "Both `ftol` and `xtol` termination conditions are satisfied.",
+  "nfev": 17,
+  "cost": 52489.238183576046,
+  "fit_initial_solid": false,
+  "fitted": {
+    "ua_w_k": 4907.3630660483095,
+    "solid_capacitance_j_k": 100.0080584514706,
+    "initial_solid_k": 300.0
+  },
+  "metrics": {
+    "outlet_rmse_k": 75.1131002984471,
+    "inlet_rmse_k": 86.84564296974366,
+    "mean_rmse_k": 80.97937163409537,
+    "outlet_mae_k": 70.01957386284377,
+    "inlet_mae_k": 79.09794838481544,
+    "outlet_mean_error_k": 66.69306314981841,
+    "inlet_mean_error_k": 79.08716593482742,
+    "outlet_final_error_k": 92.62112904850372,
+    "inlet_final_error_k": 109.14242822044253
+  },
+  "residual_norm_k": 995.3446404697423,
+  "files": {
+    "fitted_config": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\config\\yang_validation_lumped_matrix_fitted.json",
+    "output_csv": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation_lumped_matrix.csv",
+    "output_plot": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\yang_validation_lumped_matrix.png",
+    "outlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang.csv",
+    "inlet_data": "C:\\Users\\adlan\\Downloads\\Data_Test1_yang_inlet.csv"
+  }
+}

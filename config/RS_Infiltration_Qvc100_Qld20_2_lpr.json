@@ -24,7 +24,7 @@
       "regenerator_effectiveness": 0.9,
       "target_vcc_cooling_capacity_w": 103000.0,
       "fixed_vcc_compressor_speed_rpm": 1450,
-      "superheat_target_k": 5.0,
+      "superheat_target_k": 1.0,
       "free_state_variables": [
         "room_c",
         "t3_c",
@@ -113,6 +113,7 @@
   "vcc_cycle": {
     "compressor": {
       "model": "positive_displacement_clearance",
+      "eta_is_model": "w6fa_k",
       "eta_is_min": 0.4,
       "eta_is_max": 0.95,
       "clearance_factor": 0.05,
@@ -120,14 +121,13 @@
       "eta_v_min": 0.3,
       "eta_v_max": 1.0,
       "startup_backcalculate_displacement": true,
-      "displacement_m3_per_rev": 0.0014959162575277712,
+      "displacement_m3_per_rev": 0.0,
       "pressure_ratio_min": 1.000001,
       "pressure_ratio_max": 20.0,
       "speed_rpm": 1450,
       "speed_min_rpm": 1226.0,
       "speed_max_rpm": 1610.0,
-      "check_range": false,
-      "eta_is_model": "ammonia_speed_temperature_map"
+      "check_range": false
     },
     "cascade_ua_w_k": 4609.824478499044,
     "dock_evaporator": {
@@ -160,7 +160,8 @@
     "layout": "lpr",
     "low_pressure_receiver": {
       "enabled": true,
-      "force_saturated_suction": true,
+      "model": "dynamic_inventory",
+      "force_saturated_suction": false,
       "control_subcooling_with_eev": true,
       "subcooling_setpoint_k": 10.0,
       "initial_subcooling_k": 10.0,

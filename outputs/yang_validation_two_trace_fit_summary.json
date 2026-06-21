@@ -3,6 +3,14 @@
     "Data_Test1_yang.csv": "expander_outlet -> model t5_k",
     "Data_Test1_yang_inlet.csv": "expander_inlet -> model t4_k"
   },
+  "plots": {
+    "outlet_data": "yang_validation_outlet_vs_test1_data.png",
+    "outlet_residuals": "yang_validation_outlet_vs_test1_residuals.png",
+    "inlet_data": "yang_validation_inlet_vs_test1_data.png",
+    "inlet_residuals": "yang_validation_inlet_vs_test1_residuals.png",
+    "combined_data": "yang_validation_two_trace_fit_data.png",
+    "combined_residuals": "yang_validation_two_trace_fit_residuals.png"
+  },
   "combined_score_mean_rmse_k": 5.488517387212141,
   "outlet": {
     "trace": "expander_outlet",
