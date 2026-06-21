@@ -42,7 +42,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 28
+STARTUP_CACHE_VERSION = 29
 
 STATE_INDEX = {
     "room_c": 0,
@@ -1371,16 +1371,20 @@ def _solve_air_speed_for_evaporator_capacity(
 ) -> int:
     room_c, _, t3_c, t4_c, t6_c, tevap_c, _, _, _, dock_c = unknowns[:10]
     speed_cfg = config["air_cycle"]["compressor_mass_flow"]
+    initial_speed_rpm = float(speed_cfg.get("speed_rpm", 15000.0))
     lower, upper = _free_parameter_bounds(
         startup_cfg,
         "air_cycle.compressor_mass_flow.speed_rpm",
-        (float(speed_cfg.get("speed_rpm", 15000.0)), float(speed_cfg.get("speed_rpm", 15000.0))),
+        (initial_speed_rpm, initial_speed_rpm),
         clamp_air_performance_speed=air_performance_map_model(speed_cfg.get("model", "")),
     )
-    x0 = np.array([min(max(float(speed_cfg.get("speed_rpm", 15000.0)), lower), upper)], dtype=float)
+    default_tolerance_w = 1.0
+    if air_performance_map_model(speed_cfg.get("model", "")):
+        default_tolerance_w = max(default_tolerance_w, 0.02 * abs(float(target_capacity_w)))
+    tolerance_w = float(startup_cfg.get("capacity_target_tolerance_w", default_tolerance_w))
 
-    def residual(x: np.ndarray) -> np.ndarray:
-        speed_cfg["speed_rpm"] = float(x[0])
+    def residual_w(speed_rpm: float) -> float:
+        speed_cfg["speed_rpm"] = float(speed_rpm)
         air = model._evaluate_air_cycle(
             room_c + KELVIN_OFFSET,
             t3_c + KELVIN_OFFSET,
@@ -1388,31 +1392,83 @@ def _solve_air_speed_for_evaporator_capacity(
             t6_c + KELVIN_OFFSET,
         )
         q_dock = model._evaluate_dock_evaporator(dock_c, tevap_c)["q_w"]
-        return np.array([(air["q_cascade"] + q_dock - target_capacity_w) / max(target_capacity_w, 1.0)], dtype=float)
+        residual = float(air["q_cascade"] + q_dock - target_capacity_w)
+        if not np.isfinite(residual):
+            raise ValueError("Air-speed capacity residual is not finite.")
+        return residual
 
-    result = least_squares(
-        residual,
-        x0,
-        bounds=(np.array([lower], dtype=float), np.array([upper], dtype=float)),
-        x_scale=np.array([max(abs(x0[0]), 1.0)], dtype=float),
-        ftol=startup_cfg.get("least_squares_tol", 1.0e-10),
-        xtol=startup_cfg.get("least_squares_tol", 1.0e-10),
-        gtol=startup_cfg.get("least_squares_tol", 1.0e-10),
-        max_nfev=startup_cfg.get("max_function_evals", 500),
-    )
-    if not result.success:
-        raise RuntimeError(f"Could not solve air speed for target evaporator capacity: {result.message}")
-    speed_cfg["speed_rpm"] = float(result.x[0])
-    final_residual_w = float(residual(result.x)[0] * max(target_capacity_w, 1.0))
-    default_tolerance_w = 1.0
-    if air_performance_map_model(speed_cfg.get("model", "")):
-        default_tolerance_w = max(default_tolerance_w, 0.02 * abs(float(target_capacity_w)))
-    if abs(final_residual_w) > float(startup_cfg.get("capacity_target_tolerance_w", default_tolerance_w)):
+    sample_count = max(2, int(startup_cfg.get("air_speed_scan_points", 400)))
+    sample_speeds = np.linspace(lower, upper, sample_count)
+    previous: tuple[float, float] | None = None
+    bracket: tuple[float, float, float, float] | None = None
+    best: tuple[float, float] | None = None
+    iterations = 0
+    invalid_trials = 0
+    last_invalid_error: str | None = None
+
+    for speed_rpm in sample_speeds:
+        iterations += 1
+        try:
+            f_speed = residual_w(float(speed_rpm))
+        except ValueError as exc:
+            invalid_trials += 1
+            last_invalid_error = str(exc)
+            previous = None
+            continue
+
+        if best is None or abs(f_speed) < abs(best[1]):
+            best = (float(speed_rpm), f_speed)
+        if previous is not None and previous[1] * f_speed <= 0.0:
+            bracket = (previous[0], float(speed_rpm), previous[1], f_speed)
+            break
+        previous = (float(speed_rpm), f_speed)
+
+    if bracket is None:
+        if best is not None:
+            speed_cfg["speed_rpm"] = float(best[0])
+            if abs(best[1]) <= tolerance_w:
+                return iterations
+            invalid_note = f"; skipped {invalid_trials} invalid trial speeds" if invalid_trials else ""
+            raise RuntimeError(
+                f"Could not bracket target evaporator capacity {target_capacity_w:.3f} W over speed range "
+                f"{lower:.3f} to {upper:.3f} rpm; best residual is {best[1]:.3f} W "
+                f"at {best[0]:.3f} rpm{invalid_note}."
+            )
+        invalid_note = f" Last invalid trial error: {last_invalid_error}" if last_invalid_error else ""
+        raise RuntimeError(
+            f"Could not evaluate target evaporator capacity {target_capacity_w:.3f} W over speed range "
+            f"{lower:.3f} to {upper:.3f} rpm; all {invalid_trials} trial speeds were invalid.{invalid_note}"
+        )
+
+    lo, hi, f_lo, _ = bracket
+    for _ in range(int(startup_cfg.get("air_speed_bisection_max_iter", 100))):
+        iterations += 1
+        mid = 0.5 * (lo + hi)
+        try:
+            f_mid = residual_w(mid)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid air-cycle state inside evaporator-capacity speed bracket "
+                f"{lo:.3f} to {hi:.3f} rpm."
+            ) from exc
+        if abs(f_mid) <= tolerance_w or abs(hi - lo) <= 1.0e-7:
+            speed_cfg["speed_rpm"] = float(mid)
+            return iterations
+        if f_lo * f_mid <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+            f_lo = f_mid
+
+    speed_rpm = 0.5 * (lo + hi)
+    speed_cfg["speed_rpm"] = float(speed_rpm)
+    final_residual_w = residual_w(speed_rpm)
+    if abs(final_residual_w) > tolerance_w:
         raise RuntimeError(
             f"Could not meet target evaporator capacity {target_capacity_w:.3f} W; "
-            f"best residual is {final_residual_w:.3f} W at {float(result.x[0]):.3f} rpm."
+            f"best residual is {final_residual_w:.3f} W at {speed_rpm:.3f} rpm."
         )
-    return int(result.nfev)
+    return iterations
 
 
 def _air_metrics_for_head(
