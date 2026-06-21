@@ -84,15 +84,19 @@ class PIDController:
 
         bias = float(self.cfg.get("bias", get_path(plant_config, self.cfg["actuator_path"])))
         gain = float(self.cfg["gain"])
-        ti_min = float(self.cfg["Ti_min"])
+        ti_s = max(float(self.cfg["Ti_min"]) * 60.0, 1.0e-9)
 
         raw_output = bias + gain * error
-        raw_output += gain * (proposed_integral / (ti_min * 60.0))
+        raw_output += gain * (proposed_integral / ti_s)
 
         target_output = min(max(raw_output, float(self.cfg["u_min"])), float(self.cfg["u_max"]))
-        if target_output == raw_output or not self.cfg.get("anti_windup", True):
-            self.state.integral = proposed_integral
         output = self._apply_actuator_dynamics(target_output, plant_config, dt_s)
+        if not self.cfg.get("anti_windup", True):
+            self.state.integral = proposed_integral
+        elif abs(gain) > 1.0e-12:
+            self.state.integral = (output - bias - gain * error) * ti_s / gain
+        elif abs(output - raw_output) <= 1.0e-12:
+            self.state.integral = proposed_integral
         set_path(plant_config, self.cfg["actuator_path"], output)
         return output
 

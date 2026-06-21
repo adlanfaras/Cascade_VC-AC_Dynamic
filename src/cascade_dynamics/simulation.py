@@ -1104,6 +1104,18 @@ def _apply_cached_free_parameters(config: dict[str, Any], free_parameter_values:
         set_path(config, path, value)
 
 
+def _record_startup_control_actuators(config: dict[str, Any], snapshot: dict[str, float]) -> None:
+    for controller in config.get("control", {}).get("controllers", []):
+        actuator_path = controller.get("actuator_path")
+        if not actuator_path:
+            continue
+        try:
+            value = float(get_path(config, str(actuator_path)))
+        except (KeyError, TypeError, ValueError):
+            continue
+        snapshot[f"startup_solved_{str(actuator_path).replace('.', '_')}"] = value
+
+
 def configure_disturbances(config: dict[str, Any]) -> None:
     infiltration_cfg = config.get("disturbances", {}).get("infiltration", {})
     if not infiltration_cfg.get("enabled", False):
@@ -2787,6 +2799,7 @@ def _run_cascade_simulation(plant_config: dict[str, Any]) -> list[dict[str, floa
     step_sim_cfg = _cascade_step_solver_config(plant_config, model, sim_cfg, unknowns)
 
     if startup_snapshot:
+        _record_startup_control_actuators(plant_config, startup_snapshot)
         for controller in plant_config.get("control", {}).get("controllers", []):
             setpoint_from_startup = controller.get("setpoint_from_startup")
             if setpoint_from_startup and setpoint_from_startup in startup_snapshot:
