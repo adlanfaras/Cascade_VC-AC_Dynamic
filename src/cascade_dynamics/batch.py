@@ -20,6 +20,15 @@ class CaseResult:
     final_dock_c: float
     final_sink_c: float
     final_cop_system: float
+    final_cop_air_cycle: float
+    final_cop_vcc: float
+    final_q_room_w: float
+    final_q_cascade_w: float
+    final_q_dock_w: float
+    final_w_air_input_w: float
+    final_w_ref_comp_w: float
+    final_air_pressure_ratio: float
+    final_refrigerant_pressure_ratio: float
     final_m_air_kg_s: float
     final_m_ref_kg_s: float
 
@@ -132,6 +141,15 @@ def run_case(config: dict[str, Any], name: str, door_open_duration_s: float | No
         final_dock_c=float(last["dock_c"]),
         final_sink_c=float(last["sink_c"]),
         final_cop_system=float(last["cop_system"]),
+        final_cop_air_cycle=float(last.get("cop_air_cycle", float("nan"))),
+        final_cop_vcc=float(last.get("cop_vcc", float("nan"))),
+        final_q_room_w=float(last.get("q_room_w", float("nan"))),
+        final_q_cascade_w=float(last.get("q_cascade_w", float("nan"))),
+        final_q_dock_w=float(last.get("q_dock_w", float("nan"))),
+        final_w_air_input_w=float(last.get("w_air_input_w", float("nan"))),
+        final_w_ref_comp_w=float(last.get("w_ref_comp_w", float("nan"))),
+        final_air_pressure_ratio=float(last.get("air_pressure_ratio", float("nan"))),
+        final_refrigerant_pressure_ratio=float(last.get("refrigerant_pressure_ratio", float("nan"))),
         final_m_air_kg_s=float(last["m_air_kg_s"]),
         final_m_ref_kg_s=float(last["m_ref_kg_s"]),
     )

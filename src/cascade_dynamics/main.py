@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -8,6 +9,93 @@ from .batch import CaseResult, apply_output_version, run_case_from_config_path, 
 from .config import load_config
 from .fluids import DEFAULT_REFPROP_PATH
 from .simulation import run_simulation, save_csv, save_plot
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _cycle_cop(numerator_w: float, denominator_w: float, reported: object) -> float | None:
+    reported_cop = _finite_float(reported)
+    if reported_cop is not None:
+        return reported_cop
+    if abs(denominator_w) <= 1.0e-9:
+        return None
+    return numerator_w / denominator_w
+
+
+def _format_optional(value: float | None, precision: int = 3) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.{precision}f}"
+
+
+def _print_cycle_summary_table(values: dict[str, object]) -> None:
+    q_room_w = _finite_float(values.get("q_room_w"))
+    w_air_input_w = _finite_float(values.get("w_air_input_w"))
+    m_air_kg_s = _finite_float(values.get("m_air_kg_s"))
+    air_pressure_ratio = _finite_float(values.get("air_pressure_ratio"))
+
+    q_cascade_w = _finite_float(values.get("q_cascade_w"))
+    q_dock_w = _finite_float(values.get("q_dock_w"))
+    w_ref_comp_w = _finite_float(values.get("w_ref_comp_w"))
+    m_ref_kg_s = _finite_float(values.get("m_ref_kg_s"))
+    refrigerant_pressure_ratio = _finite_float(values.get("refrigerant_pressure_ratio"))
+
+    rows: list[list[str]] = []
+    if q_room_w is not None and w_air_input_w is not None:
+        cop_air = _cycle_cop(q_room_w, w_air_input_w, values.get("cop_air_cycle"))
+        rows.append(
+            [
+                "Air cycle",
+                "Q_room",
+                f"{q_room_w / 1000.0:.3f}",
+                "W_net",
+                f"{w_air_input_w / 1000.0:.3f}",
+                _format_optional(m_air_kg_s, 4),
+                _format_optional(air_pressure_ratio, 3),
+                _format_optional(cop_air, 3),
+            ]
+        )
+
+    if q_cascade_w is not None and q_dock_w is not None and w_ref_comp_w is not None:
+        vcc_load_w = q_cascade_w + q_dock_w
+        cop_vcc = _cycle_cop(vcc_load_w, w_ref_comp_w, values.get("cop_vcc"))
+        rows.append(
+            [
+                "VCC",
+                "Q_cascade + Q_dock",
+                f"{vcc_load_w / 1000.0:.3f}",
+                "W_NH3_comp",
+                f"{w_ref_comp_w / 1000.0:.3f}",
+                _format_optional(m_ref_kg_s, 4),
+                _format_optional(refrigerant_pressure_ratio, 3),
+                _format_optional(cop_vcc, 3),
+            ]
+        )
+
+    if not rows:
+        return
+
+    headers = ["Cycle", "Cooling basis", "Cooling [kW]", "Input basis", "Input [kW]", "m_dot [kg/s]", "PR", "COP"]
+    widths = [len(header) for header in headers]
+    for row in rows:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+
+    def line(cells: list[str]) -> str:
+        return "  " + " | ".join(cell.ljust(width) for cell, width in zip(cells, widths))
+
+    print("Cycle performance summary")
+    print(line(headers))
+    print("  " + "-+-".join("-" * width for width in widths))
+    for row in rows:
+        print(line(row))
 
 
 def _print_final_state(last: dict[str, float], plot_file: str | Path, csv_file: str | Path) -> None:
@@ -53,8 +141,25 @@ def _print_final_state(last: dict[str, float], plot_file: str | Path, csv_file: 
     maybe("Refrigerant massflow", "m_ref_kg_s", suffix=" kg/s")
     maybe("Receiver mass", "receiver_mass_kg", suffix=" kg")
     maybe("Receiver fill", "receiver_liquid_fill_fraction")
+    _print_cycle_summary_table(last)
     print(f"  Plot saved to        : {Path(plot_file).resolve()}")
     print(f"  CSV saved to         : {Path(csv_file).resolve()}")
+
+
+def _case_result_final_values(result: CaseResult) -> dict[str, object]:
+    return {
+        "q_room_w": result.final_q_room_w,
+        "q_cascade_w": result.final_q_cascade_w,
+        "q_dock_w": result.final_q_dock_w,
+        "w_air_input_w": result.final_w_air_input_w,
+        "w_ref_comp_w": result.final_w_ref_comp_w,
+        "cop_air_cycle": result.final_cop_air_cycle,
+        "cop_vcc": result.final_cop_vcc,
+        "m_air_kg_s": result.final_m_air_kg_s,
+        "m_ref_kg_s": result.final_m_ref_kg_s,
+        "air_pressure_ratio": result.final_air_pressure_ratio,
+        "refrigerant_pressure_ratio": result.final_refrigerant_pressure_ratio,
+    }
 
 
 def _print_case_result(result: CaseResult) -> None:
@@ -66,6 +171,7 @@ def _print_case_result(result: CaseResult) -> None:
     print(f"  System COP           : {result.final_cop_system:.3f}")
     print(f"  Dry-air massflow     : {result.final_m_air_kg_s:.4f} kg/s")
     print(f"  Refrigerant massflow : {result.final_m_ref_kg_s:.4f} kg/s")
+    _print_cycle_summary_table(_case_result_final_values(result))
     print(f"  Plot saved to        : {result.plot_file}")
     print(f"  CSV saved to         : {result.csv_file}")
 

@@ -1,0 +1,80 @@
+{
+  "config": "config/RS_Infiltration_Qvc100_Qld25_4_lpr.json",
+  "control_enabled": true,
+  "enabled_controllers": [
+    "B1_air_before_room_to_air_compressor_speed"
+  ],
+  "csv_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\analysis\\RS_Infiltration_Qvc100_Qld25_4_lpr_air_compressor_only.csv",
+  "plot_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\analysis\\RS_Infiltration_Qvc100_Qld25_4_lpr_air_compressor_only.png",
+  "steps": 5401,
+  "t_end_s": 5400.0,
+  "door_events": 4,
+  "initial_room_c": -30.0,
+  "final_room_c": -29.656974223771783,
+  "min_room_c": -30.0,
+  "max_room_c": -28.286664224565072,
+  "max_room_excursion_k_from_minus30": 1.7133357754349277,
+  "time_room_above_minus28_s": 0.0,
+  "recovery_after_last_open_to_minus28_s": 0.0,
+  "initial_dock_c": 5.0,
+  "final_dock_c": 4.884307766872459,
+  "min_dock_c": 4.18613708024973,
+  "max_dock_c": 5.0,
+  "final_cop_system": 1.035567750234347,
+  "mean_cop_system": 1.0300802770967867,
+  "peak_power_kw": 66.23909956661791,
+  "final_power_kw": 64.53229413556932,
+  "energy_kwh": 97.29720575854311,
+  "initial_m_air_kg_s": 3.913849170705986,
+  "final_m_air_kg_s": 3.937387707155684,
+  "min_m_air_kg_s": 3.8755577495312807,
+  "max_m_air_kg_s": 3.937387707155684,
+  "initial_m_ref_kg_s": 0.09239381280812412,
+  "final_m_ref_kg_s": 0.09198682568692326,
+  "initial_nh3_speed_rpm": 1450.0,
+  "final_nh3_speed_rpm": 1450.0,
+  "initial_air_speed_rpm": 15243.107769423557,
+  "final_air_speed_rpm": 15396.827554666432,
+  "min_air_speed_rpm": 15243.107769423557,
+  "max_air_speed_rpm": 15396.827554666432,
+  "initial_b1_output_rpm": 15243.107769423557,
+  "final_b1_output_rpm": 15396.827554666432,
+  "max_b1_output_rpm": 15396.827554666432,
+  "initial_valve_opening": 0.375,
+  "final_valve_opening": 0.375,
+  "initial_dock_air_m_dot_kg_s": 3.5,
+  "final_dock_air_m_dot_kg_s": 3.5,
+  "initial_subcooling_k": 10.0,
+  "final_subcooling_k": 7.668334600237709,
+  "max_infiltration_total_kw": 10.227082178573008,
+  "events": [
+    {
+      "event": 1,
+      "start_s": 6.0,
+      "peak_room_c": -28.735092704473757,
+      "peak_time_s": 906.0,
+      "peak_dock_c": 4.950366023974911
+    },
+    {
+      "event": 2,
+      "start_s": 906.0,
+      "peak_room_c": -28.286664224565072,
+      "peak_time_s": 916.0,
+      "peak_dock_c": 4.93978427328184
+    },
+    {
+      "event": 3,
+      "start_s": 1806.0,
+      "peak_room_c": -28.55035355262551,
+      "peak_time_s": 1816.0,
+      "peak_dock_c": 4.924841681219186
+    },
+    {
+      "event": 4,
+      "start_s": 2706.0,
+      "peak_room_c": -28.754882271273548,
+      "peak_time_s": 2716.0,
+      "peak_dock_c": 4.913155764862575
+    }
+  ]
+}

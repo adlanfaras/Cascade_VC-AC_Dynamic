@@ -1,0 +1,70 @@
+{
+  "config": "config/RS_Infiltration_Qvc100_Qld25_4_lpr.json",
+  "control_enabled": false,
+  "controllers_enabled": false,
+  "csv_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\analysis\\RS_Infiltration_Qvc100_Qld25_4_lpr_controls_disabled.csv",
+  "plot_file": "C:\\Users\\adlan\\Downloads\\Cascade_VC-AC_Dynamic\\outputs\\analysis\\RS_Infiltration_Qvc100_Qld25_4_lpr_controls_disabled.png",
+  "steps": 5401,
+  "t_end_s": 5400.0,
+  "door_events": 4,
+  "initial_room_c": -30.0,
+  "final_room_c": -28.475320281292497,
+  "min_room_c": -30.0,
+  "max_room_c": -27.879767029127823,
+  "max_room_excursion_k_from_minus30": 2.120232970872177,
+  "time_room_above_minus28_s": 151.0,
+  "recovery_after_last_open_to_minus28_s": 38.0,
+  "initial_dock_c": 5.0,
+  "final_dock_c": 4.964359375879641,
+  "min_dock_c": 4.213844974467608,
+  "max_dock_c": 5.0,
+  "final_cop_system": 1.0164408401429368,
+  "mean_cop_system": 1.0158063572029108,
+  "peak_power_kw": 66.23909956661791,
+  "final_power_kw": 65.72947468728924,
+  "initial_m_air_kg_s": 3.913849170705986,
+  "final_m_air_kg_s": 3.8625296951871917,
+  "initial_m_ref_kg_s": 0.09239381280812412,
+  "final_m_ref_kg_s": 0.09226763971362367,
+  "initial_nh3_speed_rpm": 1450.0,
+  "final_nh3_speed_rpm": 1450.0,
+  "initial_air_speed_rpm": 15243.107769423557,
+  "final_air_speed_rpm": 15243.107769423557,
+  "initial_valve_opening": 0.375,
+  "final_valve_opening": 0.375,
+  "initial_dock_air_m_dot_kg_s": 3.5,
+  "final_dock_air_m_dot_kg_s": 3.5,
+  "initial_subcooling_k": 10.0,
+  "final_subcooling_k": 9.275365305948782,
+  "max_infiltration_total_kw": 10.227043487287736,
+  "events": [
+    {
+      "event": 1,
+      "start_s": 6.0,
+      "peak_room_c": -28.31407439886002,
+      "peak_time_s": 906.0,
+      "peak_dock_c": 4.969239429424349
+    },
+    {
+      "event": 2,
+      "start_s": 906.0,
+      "peak_room_c": -27.879767029127823,
+      "peak_time_s": 916.0,
+      "peak_dock_c": 4.978664837888969
+    },
+    {
+      "event": 3,
+      "start_s": 1806.0,
+      "peak_room_c": -27.92428276727197,
+      "peak_time_s": 1816.0,
+      "peak_dock_c": 4.978547608102006
+    },
+    {
+      "event": 4,
+      "start_s": 2706.0,
+      "peak_room_c": -27.926976583323075,
+      "peak_time_s": 2716.0,
+      "peak_dock_c": 4.978527137697552
+    }
+  ]
+}

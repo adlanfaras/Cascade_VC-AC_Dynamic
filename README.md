@@ -7,7 +7,11 @@ Dynamic simulator for a cascade refrigeration system with:
 - loading-dock evaporator branch
 - optional door-opening infiltration disturbance cases
 
+In the coupled cascade model, the high-pressure air path defaults to the cascade heat exchanger first and the regenerator second. The runtime default is `air_cycle.heat_exchanger_order = "cascade_then_regenerator"`, and startup initialization/cache signatures include that topology.
+
 The simulator writes CSV results and plots to `outputs/`.
+
+Each run also prints a cycle performance summary table. The air-cycle row reports `COP = Q_room / W_net`, using CSV fields `q_room_w / w_air_input_w`. The VCC row reports `COP = (Q_cascade + Q_dock) / W_NH3_comp`, using `q_cascade_w`, `q_dock_w`, and `w_ref_comp_w`. Coupled cascade CSV outputs include the matching `cop_air_cycle` and `cop_vcc` fields.
 
 ## Standalone Validation Modes
 

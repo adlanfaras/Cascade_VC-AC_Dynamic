@@ -1,0 +1,98 @@
+Text explanation of Yang validation results
+===========================================
+
+The Yang validation compares the transient air-cycle model against Yang et al.
+2019 test 1 data. Two experimental traces are used:
+
+- expander outlet temperature, mapped to model variable t5_k
+- expander inlet temperature, mapped to model variable t4_k
+
+The comparison covers roughly 2.0 min to 119.7 min of experimental data. The
+main purpose is to check whether the model can reproduce the measured
+temperature pull-down and final temperature level during the Yang test.
+
+Baseline two-trace validation
+-----------------------------
+
+For the baseline Yang validation run, the combined mean RMSE is 5.49 K. The
+expander outlet trace has an RMSE of 7.24 K and an MAE of 4.76 K. Its mean
+error is only +0.31 K, which means the outlet prediction is not strongly biased
+overall, although it still has a large maximum absolute error of 30.00 K during
+the transient. At the end of the test, the model outlet temperature is
+107.82 K, while the experimental outlet temperature is 105.21 K, giving a
+final error of +2.61 K.
+
+The expander inlet trace is closer in RMSE, with an RMSE of 3.73 K and an MAE
+of 3.21 K. Its mean error is -3.03 K, so the model generally predicts a colder
+inlet than the experiment. At the end of the test, the model inlet temperature
+is 133.96 K compared with the experimental value of 136.65 K, giving a final
+error of -2.69 K.
+
+Overall, the baseline result captures the final temperature level reasonably
+well, especially considering that both final errors are within about 3 K. The
+largest mismatch is in the transient outlet response, where the maximum error
+reaches about 30 K. This indicates that the model is better at matching the
+long-time operating point than the early or middle transient shape.
+
+Counterflow-cell model calibration
+----------------------------------
+
+Several reduced regenerator model variants were fitted to the same Yang inlet
+and outlet traces. The best performing case is the 6-cell counterflow model
+with the initial solid temperature fitted. This fit gives:
+
+- fitted UA = 1554.00 W/K
+- fitted solid capacitance = 9960.67 J/K
+- fitted initial solid temperature = 309.95 K
+- outlet RMSE = 7.12 K
+- inlet RMSE = 2.52 K
+- mean RMSE = 4.82 K
+- outlet final error = +4.35 K
+- inlet final error = -0.52 K
+
+This is the strongest validation result among the fitted variants because it
+reduces the combined mean RMSE from 5.49 K in the baseline case to 4.82 K. The
+inlet prediction improves clearly, and the outlet RMSE also improves slightly.
+The final inlet temperature is very close to the experiment, with less than
+1 K error. The final outlet temperature remains warm by about 4.35 K, so the
+model still does not perfectly reproduce the cold-end final state.
+
+The 6-cell counterflow model without fitting the initial solid temperature is
+also acceptable but slightly weaker. It gives a mean RMSE of 5.22 K, with
+7.80 K outlet RMSE and 2.64 K inlet RMSE. This shows that the counterflow-cell
+structure itself is helpful, but allowing the initial regenerator solid
+temperature to adjust improves the transient match.
+
+The 4-cell counterflow model performs much worse, with a mean RMSE of
+20.80 K. Its outlet and inlet final errors are about +27.64 K and +28.41 K,
+respectively. This suggests that four cells are not enough to represent the
+thermal distribution in the regenerator for this validation case.
+
+Rejected matrix/lumped variants
+-------------------------------
+
+The lumped matrix and two-lump matrix fits should not be treated as successful
+Yang validation results. Both give very large errors:
+
+- lumped matrix mean RMSE = 80.98 K
+- two-lump matrix mean RMSE = 81.19 K
+- final errors exceed 90 K at the outlet and 109 K at the inlet
+
+These results indicate that the lumped matrix structures are too simplified or
+poorly conditioned for this Yang transient. They do not reproduce either the
+temperature level or the transient trend with acceptable accuracy.
+
+Conclusion
+----------
+
+The Yang validation supports using the counterflow-cell regenerator model,
+especially the 6-cell version with fitted initial solid temperature. That model
+matches both Yang traces with a mean RMSE of 4.82 K and keeps the final inlet
+error below 1 K, while the final outlet error is about 4.35 K. The validation is
+therefore good enough to show that the model can reproduce the main transient
+cooling behavior and final temperature level, but it also shows a remaining
+limitation in the expander outlet transient and final outlet prediction.
+
+In short, the Yang validation is successful for the 6-cell counterflow model,
+partially successful for the baseline model, and unsuccessful for the lumped
+matrix variants.

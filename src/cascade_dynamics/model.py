@@ -35,6 +35,7 @@ from .infiltration import (
 
 KELVIN_OFFSET = 273.15
 CP_DOCK_AIR = 1005.0
+DEFAULT_AIR_HEAT_EXCHANGER_ORDER = "cascade_then_regenerator"
 H_FG_WATER = 2.501e6
 H_SUBLIMATION_ICE = 2.834e6
 MAP_POWER_PRESSURE_LIFT_MODES = {
@@ -705,6 +706,22 @@ class CascadeSystemModel:
             return np.concatenate([values, np.full(state_count - values.size, values[-1], dtype=float)])
         total_cap = max(float(cfg.get("solid_capacitance_j_k", cfg.get("capacitance_j_k", 1.0))), 1.0e-9)
         return np.full(state_count, total_cap / max(state_count, 1), dtype=float)
+
+    def _air_heat_exchanger_order(self) -> str:
+        raw_order = self.cfg.get("air_cycle", {}).get("heat_exchanger_order", DEFAULT_AIR_HEAT_EXCHANGER_ORDER)
+        order = str(raw_order or DEFAULT_AIR_HEAT_EXCHANGER_ORDER).strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "cascade_then_regenerator": DEFAULT_AIR_HEAT_EXCHANGER_ORDER,
+            "cascade_regenerator": DEFAULT_AIR_HEAT_EXCHANGER_ORDER,
+            "cascade_first": DEFAULT_AIR_HEAT_EXCHANGER_ORDER,
+            "cascade_heat_exchanger_then_regenerator": DEFAULT_AIR_HEAT_EXCHANGER_ORDER,
+        }
+        if order not in aliases:
+            raise ValueError(
+                "Unsupported air_cycle.heat_exchanger_order "
+                f"'{raw_order}'. Use '{DEFAULT_AIR_HEAT_EXCHANGER_ORDER}'."
+            )
+        return aliases[order]
 
     def _evaluate_lumped_cascade_exchanger(
         self,
@@ -1734,6 +1751,7 @@ class CascadeSystemModel:
         return p1 * (0.5 * (lo + hi))
 
     def _evaluate_air_cycle(self, room_k: float, t3_k: float, t4_k: float, t6_k: float) -> dict[str, float]:
+        self._air_heat_exchanger_order()
         air_cfg = self.cfg["air_cycle"]
         p1 = air_cfg["p_low_pa"]
         x_room = self._room_humidity_ratio(room_k, p1)
@@ -3185,7 +3203,8 @@ class CascadeSystemModel:
         condenser_ua = self._vcc_condenser_ua_result()
         condenser_lmtd = positive_lmtd(tcond_c - bc["ambient_c"], tcond_c - sink_c)
         sink_rejection = bc["sink_m_dot_kg_s"] * bc["sink_cp_j_kg_k"] * (sink_c - bc["ambient_c"])
-        cop = ref["q_evap_total"] / max(ref["w_ref_comp"], 1.0)
+        vcc_load_w = loads["cascade_w"] + loads["dock_w"]
+        cop = vcc_load_w / max(ref["w_ref_comp"], 1.0)
         values = {
             "time_s": time_s,
             "room_c": float("nan"),
@@ -3525,6 +3544,8 @@ class CascadeSystemModel:
         q_dock_external = q_dock
         useful_cooling = air["q_room"] + q_dock_external
         total_input_power = air_input_power + ref["w_ref_comp"]
+        cop_air_cycle = air["q_room"] / max(air_input_power, 1.0)
+        cop_vcc = (air["q_cascade"] + q_dock) / max(ref["w_ref_comp"], 1.0)
         cop = useful_cooling / max(total_input_power, 1.0)
         cop_room_only = air["q_room"] / max(total_input_power, 1.0)
         t2_c = air["t2_k"] - KELVIN_OFFSET
@@ -3668,6 +3689,8 @@ class CascadeSystemModel:
             "refrigerant_compressor_isentropic_work_w": ref["w_ref_isentropic"],
             "refrigerant_compressor_eta_is_target": ref["eta_is_target"],
             "refrigerant_compressor_eta_is_effective": ref["eta_is_effective"],
+            "cop_air_cycle": cop_air_cycle,
+            "cop_vcc": cop_vcc,
             "cop_system": cop,
             "cop_room_only": cop_room_only,
             "base_room_load_w": self._base_room_load_w(time_s),

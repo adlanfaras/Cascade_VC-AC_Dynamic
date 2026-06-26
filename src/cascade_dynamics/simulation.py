@@ -30,6 +30,7 @@ from .humid_air import humid_air_state, saturated_room_humidity_ratio, state_at_
 from .model import (
     CP_DOCK_AIR,
     CascadeSystemModel,
+    DEFAULT_AIR_HEAT_EXCHANGER_ORDER,
     compressor_discharge_pressure_from_power,
     compressor_eta_is_from_map_power,
     compressor_mass_flow_positive_displacement,
@@ -42,7 +43,7 @@ from .numerics import NewtonSolveError, newton_raphson_fd
 
 
 KELVIN_OFFSET = 273.15
-STARTUP_CACHE_VERSION = 29
+STARTUP_CACHE_VERSION = 30
 
 STATE_INDEX = {
     "room_c": 0,
@@ -366,6 +367,10 @@ def _startup_signature_data(config: dict[str, Any]) -> dict[str, Any]:
     sim_cfg = config["simulation"].get("startup_initialization", {})
     return {
         "cache_version": STARTUP_CACHE_VERSION,
+        "air_heat_exchanger_order": config.get("air_cycle", {}).get(
+            "heat_exchanger_order",
+            DEFAULT_AIR_HEAT_EXCHANGER_ORDER,
+        ),
         "startup_initialization": sim_cfg,
         "fluids": config["fluids"],
         "air_cycle": config["air_cycle"],
@@ -512,6 +517,7 @@ def _configure_cascade_lumped_heat_exchangers(config: dict[str, Any]) -> None:
         return
 
     air_cfg = config.setdefault("air_cycle", {})
+    air_cfg.setdefault("heat_exchanger_order", DEFAULT_AIR_HEAT_EXCHANGER_ORDER)
     reg_cfg = air_cfg.setdefault("regenerator", {})
     if isinstance(reg_cfg, dict) and reg_cfg.get("enabled", True):
         explicit_gas_solid_ua_factor = "gas_solid_ua_factor" in reg_cfg

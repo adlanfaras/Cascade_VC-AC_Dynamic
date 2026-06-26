@@ -234,8 +234,8 @@
         "action": "direct",
         "bias": 15000.0,
         "bias_from_startup": true,
-        "gain": 20.0,
-        "Ti_min": 10.0,
+        "gain": 2099.116998,
+        "Ti_min": 1.665,
         "u_min": 10000.0,
         "u_max": 20000.0,
         "actuator_rate_limit_per_s": 50.0,
@@ -243,7 +243,7 @@
       },
       {
         "name": "B2_air_after_cascade_to_nh3_compressor_speed",
-        "enabled": true,
+        "enabled": false,
         "measurement": "t3_c",
         "setpoint": 4.0,
         "setpoint_from_startup": "t3_c",
@@ -260,7 +260,7 @@
       },
       {
         "name": "B3_subcooling_to_cascade_expansion_valve",
-        "enabled": true,
+        "enabled": false,
         "measurement": "refrigerant_subcooling_k",
         "setpoint": 10.0,
         "actuator_path": "vcc_cycle.expansion_valves.cascade.opening",
@@ -292,7 +292,7 @@
       },
       {
         "name": "B5_loading_dock_temperature_to_dock_air_flow",
-        "enabled": true,
+        "enabled": false,
         "measurement": "dock_c",
         "setpoint": 5.0,
         "setpoint_from_startup": "dock_c",

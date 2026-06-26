@@ -1,0 +1,327 @@
+{
+  "simulation": {
+    "t_start_s": 0.0,
+    "t_end_s": 5400.0,
+    "dt_s": 1.0,
+    "newton_tol": 1e-05,
+    "newton_max_iter": 100,
+    "fd_step": 1e-05,
+    "jacobian_scheme": "forward",
+    "startup_initialization": {
+      "enabled": true,
+      "mode": "paper_design_point",
+      "freeze_solved_parameters": true,
+      "targets": {
+        "room_c": -30.0,
+        "dock_c": 5.0,
+        "sink_c": 35.0,
+        "tevap_c": -5.0,
+        "tcond_c": 40.0
+      },
+      "t5_target_c": -40.0,
+      "room_delta_t_target_c": 10.0,
+      "cascade_air_evap_min_delta_t_c": 10.0,
+      "regenerator_effectiveness": 0.9,
+      "target_vcc_cooling_capacity_w": 103000.0,
+      "fixed_vcc_compressor_speed_rpm": 1450,
+      "superheat_target_k": 1.0,
+      "free_state_variables": [
+        "room_c",
+        "t3_c",
+        "t4_c",
+        "t6_c",
+        "m_ref_kg_s"
+      ],
+      "free_parameters": [
+        {
+          "path": "vcc_cycle.condenser_ua_w_k",
+          "min": 1000.0,
+          "max": 100000.0
+        },
+        {
+          "path": "vcc_cycle.cascade_ua_w_k",
+          "min": 100.0,
+          "max": 100000.0
+        },
+        {
+          "path": "air_cycle.regenerator_ua_w_k",
+          "min": 100.0,
+          "max": 100000.0
+        },
+        {
+          "path": "boundary_conditions.load_before_w",
+          "min": 1000.0,
+          "max": 200000.0
+        },
+        {
+          "path": "boundary_conditions.sink_m_dot_kg_s",
+          "min": 0.1,
+          "max": 30.0,
+          "freeze_in_transient": false
+        },
+        {
+          "path": "vcc_cycle.expansion_valves.cascade.opening",
+          "min": 0.05,
+          "max": 1.0,
+          "freeze_in_transient": false
+        },
+        {
+          "path": "vcc_cycle.compressor.speed_rpm",
+          "min": 1226.0,
+          "max": 1610.0,
+          "freeze_in_transient": false
+        },
+        {
+          "path": "air_cycle.compressor_mass_flow.speed_rpm",
+          "min": 10000.0,
+          "max": 20000.0,
+          "freeze_in_transient": false
+        }
+      ]
+    }
+  },
+  "fluids": {
+    "air": "Air",
+    "refrigerant": "Ammonia"
+  },
+  "air_cycle": {
+    "p_low_pa": 101325.0,
+    "pressure_ratio": 1.2623264797,
+    "compressor_eta_is": 0.85,
+    "turbine_eta_is": 0.85,
+    "combined_drive_efficiency": 0.9,
+    "regenerator_ua_w_k": 27467.429052096,
+    "humid_air": {
+      "room_relative_humidity": 1.0
+    },
+    "compressor_mass_flow": {
+      "model": "polynomial_volumetric_flow_head_speed",
+      "speed_rpm": 15000.0,
+      "design_speed_rpm": 15000.0,
+      "speed_scale_rpm": 5000.0,
+      "head_min_m": 642.22,
+      "head_max_m": 3000.0,
+      "pressure_ratio_min": 1.01,
+      "pressure_ratio_max": 1.6,
+      "q_min_m3_s": 0.0,
+      "q_max_m3_s": 10.0,
+      "m_dot_min_kg_s": 0.5,
+      "m_dot_max_kg_s": 6.0
+    }
+  },
+  "vcc_cycle": {
+    "compressor": {
+      "model": "positive_displacement_clearance",
+      "eta_is_model": "w6fa_k",
+      "eta_is_min": 0.4,
+      "eta_is_max": 0.95,
+      "clearance_factor": 0.05,
+      "polytropic_exponent": 1.25,
+      "eta_v_min": 0.3,
+      "eta_v_max": 1.0,
+      "startup_backcalculate_displacement": true,
+      "displacement_m3_per_rev": 0.0,
+      "pressure_ratio_min": 1.000001,
+      "pressure_ratio_max": 20.0,
+      "speed_rpm": 1450,
+      "speed_min_rpm": 1226.0,
+      "speed_max_rpm": 1610.0,
+      "check_range": false
+    },
+    "cascade_ua_w_k": 4216.325690412,
+    "dock_evaporator": {
+      "model": "ua_lmtd_air",
+      "startup_backcalculate_ua_w_k": true,
+      "design_air_m_dot_kg_s": 3.5,
+      "air_m_dot_kg_s": 3.5,
+      "air_m_dot_min_kg_s": 1.0,
+      "air_m_dot_max_kg_s": 7.0,
+      "air_cp_j_kg_k": 1005.0,
+      "fan_power_ref_w": 0.0,
+      "fan_power_exponent": 3.0,
+      "fan_heat_fraction_to_dock": 1.0
+    },
+    "condenser_ua_w_k": 18000.0,
+    "subcooling_k": 10.0,
+    "branch_holdup": {
+      "outlet_enthalpy_time_constant_s": 5.0
+    },
+    "expansion_valves": {
+      "cascade": {
+        "opening": 0.375,
+        "flow_coefficient_kg_s_pa": 1.5829e-07
+      }
+    },
+    "layout": "lpr",
+    "low_pressure_receiver": {
+      "enabled": true,
+      "model": "dynamic_inventory",
+      "force_saturated_suction": false,
+      "control_subcooling_with_eev": true,
+      "subcooling_setpoint_k": 10.0,
+      "initial_subcooling_k": 10.0,
+      "subcooling_min_k": 0.0,
+      "subcooling_max_k": 30.0,
+      "subcooling_inventory_gain_k_per_kg": 30.0,
+      "subcooling_relaxation_time_s": 0.0,
+      "volume_m3": 0.002,
+      "evaporator_arrangement": "series_dock_cascade"
+    },
+    "evaporator_arrangement": "series_dock_cascade"
+  },
+  "thermal_masses": {
+    "room_capacitance_j_k": 200000.0,
+    "dock_capacitance_j_k": 120000.0,
+    "sink_capacitance_j_k": 500000.0
+  },
+  "boundary_conditions": {
+    "dock_initial_c": 5.0,
+    "ambient_c": 30.0,
+    "load_step_time_s": 600.0,
+    "load_before_w": 43844.69420604,
+    "load_after_w": 43844.69420604,
+    "dock_load_before_w": 20600.0,
+    "dock_load_after_w": 20600.0,
+    "sink_m_dot_kg_s": 6.2,
+    "sink_cp_j_kg_k": 4180.0
+  },
+  "disturbances": {
+    "infiltration": {
+      "enabled": true,
+      "model": "tian_unsteady",
+      "schedule": {
+        "start_time_s": 5.0,
+        "ramp_time_s": 2.0,
+        "open_duration_s": 12.0,
+        "opening_fraction": 1.0,
+        "interval_s": 1800.0,
+        "repeat_count": 2
+      },
+      "outdoor_source": "dock",
+      "outdoor_relative_humidity": 0.65,
+      "effectiveness": 0.96,
+      "door": {
+        "width_m": 2.8,
+        "height_m": 3.3
+      },
+      "room": {
+        "width_m": 5.24,
+        "length_m": 8.72,
+        "height_m": 3.0
+      },
+      "dock": {
+        "width_m": 4.34,
+        "length_m": 7.24,
+        "height_m": 3.0
+      },
+      "lambda_f": 0.025,
+      "xi_sum": 4.0,
+      "effective_length_model": "tian_empirical",
+      "effective_nozzle_constant": 0.1,
+      "integration_max_step_s": 0.05
+    }
+  },
+  "control": {
+    "enabled": true,
+    "controllers": [
+      {
+        "name": "B1_air_before_room_to_air_compressor_speed",
+        "enabled": false,
+        "measurement": "room_c",
+        "setpoint": -30.0,
+        "setpoint_from_startup": "room_c",
+        "actuator_path": "air_cycle.compressor_mass_flow.speed_rpm",
+        "action": "direct",
+        "bias": 15000.0,
+        "bias_from_startup": true,
+        "gain": 1630.837168,
+        "Ti_min": 1.665,
+        "u_min": 10000.0,
+        "u_max": 20000.0,
+        "actuator_rate_limit_per_s": 50.0,
+        "anti_windup": true
+      },
+      {
+        "name": "B2_air_after_cascade_to_nh3_compressor_speed",
+        "enabled": true,
+        "measurement": "room_c",
+        "setpoint": -30.0,
+        "setpoint_from_startup": "room_c",
+        "actuator_path": "vcc_cycle.compressor.speed_rpm",
+        "action": "direct",
+        "bias": 1450.0,
+        "bias_from_startup": true,
+        "gain": 3602.766769,
+        "Ti_min": 0.5,
+        "u_min": 1226.0,
+        "u_max": 20000.0,
+        "actuator_rate_limit_per_s": 1.0,
+        "anti_windup": true
+      },
+      {
+        "name": "B3_subcooling_to_cascade_expansion_valve",
+        "enabled": false,
+        "measurement": "refrigerant_subcooling_k",
+        "setpoint": 10.0,
+        "actuator_path": "vcc_cycle.expansion_valves.cascade.opening",
+        "action": "direct",
+        "bias": 0.375,
+        "bias_from_startup": true,
+        "gain": 0.02,
+        "Ti_min": 7.0,
+        "u_min": 0.05,
+        "u_max": 1.0,
+        "actuator_time_constant_s": 5.0,
+        "actuator_rate_limit_per_s": 0.002,
+        "anti_windup": true
+      },
+      {
+        "name": "B4_subcooling_to_sink_flow",
+        "enabled": false,
+        "measurement": "refrigerant_subcooling_k",
+        "setpoint": 0.0,
+        "actuator_path": "boundary_conditions.sink_m_dot_kg_s",
+        "action": "reverse",
+        "bias": 6.2,
+        "bias_from_startup": true,
+        "gain": 0.5,
+        "Ti_min": 3.0,
+        "u_min": 0.5,
+        "u_max": 30.0,
+        "anti_windup": true
+      },
+      {
+        "name": "B5_loading_dock_temperature_to_dock_air_flow",
+        "enabled": false,
+        "measurement": "dock_c",
+        "setpoint": 5.0,
+        "setpoint_from_startup": "dock_c",
+        "actuator_path": "vcc_cycle.dock_evaporator.air_m_dot_kg_s",
+        "action": "direct",
+        "bias": 3.5,
+        "bias_from_startup": true,
+        "gain": 0.3,
+        "Ti_min": 3.0,
+        "u_min": 1.0,
+        "u_max": 7.0,
+        "actuator_rate_limit_per_s": 0.05,
+        "anti_windup": true
+      }
+    ]
+  },
+  "initial_guess": {
+    "room_c": -30.0,
+    "sink_c": 30.0,
+    "t3_c": 4.0,
+    "t4_c": -15.0,
+    "t6_c": 6.0,
+    "tevap_c": -5.0,
+    "tcond_c": 40.0,
+    "m_ref_kg_s": 0.095625,
+    "dock_c": 5.0
+  },
+  "output": {
+    "plot_file": "outputs/RS_Infiltration_Qvc100_Qld20_2_lpr.png",
+    "csv_file": "outputs/RS_Infiltration_Qvc100_Qld20_2_lpr.csv"
+  }
+}
